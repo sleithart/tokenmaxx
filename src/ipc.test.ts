@@ -65,9 +65,10 @@ afterEach(async () => {
 })
 
 describe('routing over ipc', () => {
-	test('reads and toggles codex and claude routing', async () => {
+	test('reads and toggles codex, claude, and antigravity routing', async () => {
 		expect((await readRouting(socketPath)).routed).toEqual({
 			anthropic: false,
+			antigravity: false,
 			openai: false,
 			xai: false
 		})
@@ -79,6 +80,11 @@ describe('routing over ipc', () => {
 
 		const off = await requestRouting(socketPath, 'anthropic', false)
 		expect(off.routed.anthropic).toBe(false)
+
+		const agyOn = await requestRouting(socketPath, 'antigravity', true)
+		expect(agyOn.routed.antigravity).toBe(true)
+		const agyOff = await requestRouting(socketPath, 'antigravity', false)
+		expect(agyOff.routed.antigravity).toBe(false)
 	})
 
 	test('routes pi and refuses to touch a models.json it cannot parse', async () => {

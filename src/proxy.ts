@@ -560,5 +560,7 @@ export function upstreamFor(provider: ProviderId): string {
 			return 'https://api.anthropic.com'
 		case 'xai':
 			return 'https://cli-chat-proxy.grok.com'
+		case 'antigravity':
+			return 'https://daily-cloudcode-pa.googleapis.com'
 	}
 }

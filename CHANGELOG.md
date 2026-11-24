@@ -1,3 +1,4 @@
+- [2026-11-24] add antigravity CLI keychain switching and quota monitoring
 - [2026-10-30] the login daemon runs at interactive priority, so the dashboard stops timing out
 - [2026-10-28] analytics reads a per-minute rollup, so an open dashboard stops freezing the daemon
 - [2026-10-14] the dashboard fits the terminal it runs in

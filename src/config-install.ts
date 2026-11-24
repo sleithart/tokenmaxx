@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { forgetConfigBackup, restoreConfigBackup, saveConfigBackup } from './config-backup.ts'
@@ -298,6 +298,32 @@ export async function uninstallGrokConfig(path = grokConfigPath()): Promise<stri
 	return path
 }
 
+function antigravityRoutingMarkerPath(paths: ApplicationPaths): string {
+	return join(paths.root, 'antigravity-routing.json')
+}
+
+export async function installAntigravityConfig(paths: ApplicationPaths): Promise<string> {
+	const path = antigravityRoutingMarkerPath(paths)
+	await mkdir(dirname(path), { mode: 0o700, recursive: true })
+	await writeFile(path, `${JSON.stringify({ mode: 'keychain' }, null, 2)}\n`, { mode: 0o600 })
+	return path
+}
+
+export async function uninstallAntigravityConfig(
+	paths = applicationPaths()
+): Promise<string | null> {
+	const path = antigravityRoutingMarkerPath(paths)
+	const existed = await stat(path).then(
+		() => true,
+		() => false
+	)
+	if (!existed) {
+		return null
+	}
+	await rm(path, { force: true })
+	return path
+}
+
 export function installProviderConfig(
 	provider: ProviderId,
 	paths: ApplicationPaths
@@ -309,17 +335,24 @@ export function installProviderConfig(
 			return installClaudeConfig(paths)
 		case 'xai':
 			return installGrokConfig(paths)
+		case 'antigravity':
+			return installAntigravityConfig(paths)
 	}
 }
 
-export function uninstallProviderConfig(provider: ProviderId): Promise<string | null> {
+export function uninstallProviderConfig(
+	provider: ProviderId,
+	paths = applicationPaths()
+): Promise<string | null> {
 	switch (provider) {
 		case 'openai':
-			return uninstallCodexConfig()
+			return uninstallCodexConfig(paths)
 		case 'anthropic':
-			return uninstallClaudeConfig()
+			return uninstallClaudeConfig(paths)
 		case 'xai':
 			return uninstallGrokConfig()
+		case 'antigravity':
+			return uninstallAntigravityConfig(paths)
 	}
 }
 
@@ -329,7 +362,7 @@ interface InstallStatus {
 	routed: Record<ProviderId, boolean>
 }
 
-export async function installStatus(): Promise<InstallStatus> {
+export async function installStatus(paths = applicationPaths()): Promise<InstallStatus> {
 	const codexRaw = await readFileOrEmpty(codexConfigPath())
 	let codexRouted = false
 	let codexBaseUrl: string | null = null
@@ -378,10 +411,24 @@ export async function installStatus(): Promise<InstallStatus> {
 		grokBaseUrl = null
 	}
 	const grokRouted = grokBaseUrl?.includes('127.0.0.1') ?? false
+	const antigravityRouted = await stat(antigravityRoutingMarkerPath(paths)).then(
+		() => true,
+		() => false
+	)
 	return {
-		baseUrls: { anthropic: claudeBaseUrl, openai: codexBaseUrl, xai: grokBaseUrl },
+		baseUrls: {
+			anthropic: claudeBaseUrl,
+			antigravity: null,
+			openai: codexBaseUrl,
+			xai: grokBaseUrl
+		},
 		codexStale,
-		routed: { anthropic: claudeRouted, openai: codexRouted, xai: grokRouted }
+		routed: {
+			anthropic: claudeRouted,
+			antigravity: antigravityRouted,
+			openai: codexRouted,
+			xai: grokRouted
+		}
 	}
 }
 
@@ -394,16 +441,21 @@ export async function healInstalledConfigs(paths: ApplicationPaths): Promise<Pro
 	if ((await readFileOrEmpty(stampPath)).trim() === VERSION) {
 		return []
 	}
-	const { baseUrls, routed } = await installStatus()
-	const ownBaseUrls: Record<ProviderId, string> = {
+	const { baseUrls, routed } = await installStatus(paths)
+	const ownBaseUrls: Record<ProviderId, string | null> = {
 		anthropic: proxyBaseUrl(paths, 'anthropic'),
+		antigravity: null,
 		openai: proxyBaseUrl(paths, 'openai'),
 		xai: `${proxyBaseUrl(paths, 'xai')}/v1`
 	}
 	const healed: ProviderId[] = []
 	for (const provider of ProviderIdSchema.options) {
 		const baseUrl = baseUrls[provider]
-		if (routed[provider] && (baseUrl === null || baseUrl === ownBaseUrls[provider])) {
+		if (
+			routed[provider] &&
+			ownBaseUrls[provider] !== null &&
+			(baseUrl === null || baseUrl === ownBaseUrls[provider])
+		) {
 			await installProviderConfig(provider, paths)
 			healed.push(provider)
 		}

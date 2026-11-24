@@ -6,6 +6,7 @@ import { removeClaudeProfile } from './claude.ts'
 import { recordedConfigPaths, restoreConfigBackup } from './config-backup.ts'
 import {
 	clientConfigPaths,
+	uninstallAntigravityConfig,
 	uninstallClaudeConfig,
 	uninstallCodexConfig,
 	uninstallGrokConfig,
@@ -92,6 +93,7 @@ export async function uninstallTokenmaxx(input: {
 	await uninstallCodexConfig(input.paths, configs.codex)
 	await uninstallClaudeConfig(input.paths, configs.claude)
 	await uninstallGrokConfig(configs.grok)
+	await uninstallAntigravityConfig(input.paths)
 	const pi = await uninstallPiConfig(input.paths, configs.pi)
 	if (pi.manual !== null)
 		throw new ApplicationError('CONFIG_UNINSTALL_FAILED', `${pi.path}: ${pi.manual}`)
@@ -110,7 +112,8 @@ export async function uninstallTokenmaxx(input: {
 		join(input.paths.runtime, 'daemon.log'),
 		join(input.paths.root, 'preferences.json'),
 		join(input.paths.root, 'healed-version'),
-		join(input.paths.root, 'config-backups.json')
+		join(input.paths.root, 'config-backups.json'),
+		join(input.paths.root, 'antigravity-routing.json')
 	])
 		await rm(path, { force: true })
 	for (const directory of [

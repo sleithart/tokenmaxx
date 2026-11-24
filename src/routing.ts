@@ -27,12 +27,14 @@ export const RoutingStatusSchema = z
 export type RoutingStatus = z.infer<typeof RoutingStatusSchema>
 
 export async function routingStatus(
-	which: (binary: string) => string | null = Bun.which
+	which: (binary: string) => string | null = Bun.which,
+	paths?: ApplicationPaths
 ): Promise<RoutingStatus> {
-	const [install, pi] = await Promise.all([installStatus(), piStatus(which)])
+	const [install, pi] = await Promise.all([installStatus(paths), piStatus(which)])
 	return {
 		clis: {
 			anthropic: which(PROVIDERS.anthropic.cli) !== null,
+			antigravity: which(PROVIDERS.antigravity.cli) !== null,
 			openai: which(PROVIDERS.openai.cli) !== null,
 			xai: which(PROVIDERS.xai.cli) !== null
 		},
@@ -51,7 +53,8 @@ export async function setRouting(
 		case 'openai':
 		case 'anthropic':
 		case 'xai':
-			await (enable ? installProviderConfig(target, paths) : uninstallProviderConfig(target))
+		case 'antigravity':
+			await (enable ? installProviderConfig(target, paths) : uninstallProviderConfig(target, paths))
 			return
 		case 'pi': {
 			const result = await (enable ? installPiConfig(paths) : uninstallPiConfig())

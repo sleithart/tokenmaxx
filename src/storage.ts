@@ -310,6 +310,9 @@ function migrate(database: Database): void {
       CREATE UNIQUE INDEX IF NOT EXISTS accounts_xai_external
         ON accounts(external_account_id)
         WHERE provider = 'xai' AND external_account_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS accounts_antigravity_external
+        ON accounts(external_account_id)
+        WHERE provider = 'antigravity' AND external_account_id IS NOT NULL;
     `)
 	} catch (error) {
 		throw new ApplicationError(

@@ -6,6 +6,7 @@ pub enum Provider {
     Openai,
     Anthropic,
     Xai,
+    Antigravity,
 }
 
 impl Provider {
@@ -16,6 +17,7 @@ impl Provider {
             Provider::Openai => "codex",
             Provider::Anthropic => "claude",
             Provider::Xai => "grok",
+            Provider::Antigravity => "agy",
         }
     }
 
@@ -24,6 +26,7 @@ impl Provider {
             Provider::Openai => "Codex",
             Provider::Anthropic => "Claude Code",
             Provider::Xai => "Grok",
+            Provider::Antigravity => "Antigravity",
         }
     }
 }
@@ -292,6 +295,8 @@ pub struct ProviderFlags {
     pub anthropic: bool,
     #[serde(default)]
     pub xai: bool,
+    #[serde(default)]
+    pub antigravity: bool,
 }
 
 impl ProviderFlags {
@@ -300,6 +305,7 @@ impl ProviderFlags {
             Provider::Openai => self.openai,
             Provider::Anthropic => self.anthropic,
             Provider::Xai => self.xai,
+            Provider::Antigravity => self.antigravity,
         }
     }
 }
@@ -325,6 +331,7 @@ pub enum RoutingTarget {
     Openai,
     Anthropic,
     Xai,
+    Antigravity,
     Pi,
 }
 
@@ -334,6 +341,7 @@ impl From<Provider> for RoutingTarget {
             Provider::Openai => RoutingTarget::Openai,
             Provider::Anthropic => RoutingTarget::Anthropic,
             Provider::Xai => RoutingTarget::Xai,
+            Provider::Antigravity => RoutingTarget::Antigravity,
         }
     }
 }

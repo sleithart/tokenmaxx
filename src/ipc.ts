@@ -149,11 +149,14 @@ async function dispatch(
 			return { account }
 		}
 		case 'routing/read':
-			return routingStatus()
+			return routingStatus(Bun.which, manager.paths)
 		case 'routing/set': {
 			const parsed = RoutingParamsSchema.parse(params)
 			await setRouting(manager.paths, parsed.target, parsed.enable)
-			return routingStatus()
+			if (parsed.target === 'antigravity' && parsed.enable) {
+				await manager.syncActiveProvider('antigravity')
+			}
+			return routingStatus(Bun.which, manager.paths)
 		}
 		case 'version/latest':
 			return { latest: await availableUpdate() }

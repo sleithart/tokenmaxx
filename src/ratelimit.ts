@@ -133,5 +133,7 @@ export function observeRateLimitHeaders(
 			return codexObservation(headers, status)
 		case 'xai':
 			return xaiObservation(headers, status)
+		case 'antigravity':
+			return null
 	}
 }
