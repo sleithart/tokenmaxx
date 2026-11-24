@@ -35,6 +35,7 @@ fn slot(provider: Provider) -> usize {
         Provider::Openai => 0,
         Provider::Anthropic => 1,
         Provider::Xai => unreachable!("grok has no settings group in the app yet"),
+        Provider::Antigravity => unreachable!("antigravity has no settings group in the app yet"),
     }
 }
 

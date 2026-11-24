@@ -5,9 +5,11 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createInterface } from 'node:readline/promises'
 import { z } from 'zod'
+import { registerAntigravityAccount } from './antigravity.ts'
 import { registerClaudeAccount } from './claude.ts'
 import { registerCodexAccount } from './codex.ts'
 import {
+	clientConfigPaths,
 	healInstalledConfigs,
 	installPiConfig,
 	installProviderConfig,
@@ -202,7 +204,7 @@ interface ApplicationContext {
 	launchAgent: LaunchAgent
 }
 
-const cliWords = '<codex|claude|grok>'
+const cliWords = '<codex|claude|grok|agy>'
 
 function providerFromCli(value: string): ProviderId {
 	switch (value) {
@@ -215,10 +217,14 @@ function providerFromCli(value: string): ProviderId {
 		case 'grok':
 		case 'xai':
 			return 'xai'
+		case 'agy':
+		case 'antigravity':
+		case 'google':
+			return 'antigravity'
 		default:
 			throw new ApplicationError(
 				'INVALID_PROVIDER',
-				`Expected codex, claude or grok, received ${value}`
+				`Expected codex, claude, grok or agy, received ${value}`
 			)
 	}
 }
@@ -250,7 +256,7 @@ function help(): string {
 		return [`  ${accent(name)}`, ...lines.map(line => `${gutter}${dim(line)}`)].join('\n')
 	}
 	return [
-		`${accent('tokenmaxx')} ${dim('— switch between your own Codex, Claude Code and Grok accounts')}`,
+		`${accent('tokenmaxx')} ${dim('— switch between your own Codex, Claude Code, Grok and Antigravity accounts')}`,
 		'',
 		`${head('Usage')}  tokenmaxx <command> [options]        ${dim('run with no command for the dashboard')}`,
 		'',
@@ -258,23 +264,26 @@ function help(): string {
 		row(
 			`login ${cliWords}`,
 			'sign in an account · re-run to re-auth',
-			'add --api-key to use an API key instead'
+			'add --api-key (codex/claude/grok) or --import (agy)'
 		),
-		row('install [pi] [--autostart]', 'route codex, claude & grok, or pi; optionally start at login'),
+		row(
+			'install [pi] [--autostart]',
+			'route codex, claude, grok & agy, or pi; optionally start at login'
+		),
 		row('uninstall [pi]', 'restore your original config; accounts and data stay'),
 		row('uninstall all', 'remove setup, saved credentials/data, and the global package'),
 		'',
 		head('Everyday'),
 		row('list', 'accounts, health, and live usage'),
 		row(`switch ${cliWords} <email>`, 'make an account active now'),
-		row('logout [codex|claude|grok] <email>', 'sign out and delete the credential'),
+		row('logout [codex|claude|grok|agy] <email>', 'sign out and delete the credential'),
 		row(
 			`order ${cliWords} [email…]`,
 			'which accounts auto-rotate uses first',
 			'no emails prints the order · --reset clears it'
 		),
 		row(
-			'auto <codex|claude|grok|all> <on|off>',
+			'auto <codex|claude|grok|agy|all> <on|off>',
 			'switch accounts at a usage threshold',
 			'optional: --threshold N  (default 90)'
 		),
@@ -531,7 +540,10 @@ async function ensureDaemon(context: ApplicationContext): Promise<void> {
 	}
 }
 
-function registerIsolatedAccount(provider: ProviderId): Promise<Account> {
+function registerIsolatedAccount(
+	provider: ProviderId,
+	options: { importCurrent?: boolean } = {}
+): Promise<Account> {
 	switch (provider) {
 		case 'openai':
 			return registerCodexAccount({ vault: createMacOsKeychainVault() })
@@ -539,11 +551,17 @@ function registerIsolatedAccount(provider: ProviderId): Promise<Account> {
 			return registerClaudeAccount({ vault: createMacOsKeychainVault() })
 		case 'xai':
 			return registerGrokAccount({ vault: createMacOsKeychainVault() })
+		case 'antigravity':
+			return registerAntigravityAccount({
+				importCurrent: options.importCurrent,
+				vault: createMacOsKeychainVault()
+			})
 	}
 }
 
 const cliInstallHint: Record<ProviderId, string> = {
 	anthropic: 'npm install -g @anthropic-ai/claude-code',
+	antigravity: 'https://antigravity.google/docs/getting-started',
 	openai: 'npm install -g @openai/codex',
 	xai: 'npm install -g @xai-official/grok'
 }
@@ -639,8 +657,12 @@ async function promptApiKey(
 	}
 }
 
-async function signInOauth(context: ApplicationContext, provider: ProviderId): Promise<boolean> {
-	const authenticated = await registerIsolatedAccount(provider)
+async function signInOauth(
+	context: ApplicationContext,
+	provider: ProviderId,
+	options: { importCurrent?: boolean } = {}
+): Promise<boolean> {
+	const authenticated = await registerIsolatedAccount(provider, options)
 	const existing = context.store
 		.listAccounts(provider)
 		.find(
@@ -679,13 +701,25 @@ async function signInOauth(context: ApplicationContext, provider: ProviderId): P
 async function login(
 	context: ApplicationContext,
 	providerArgument: string | undefined,
-	options: { apiKey: boolean; apiKeyValue?: string } = { apiKey: false }
+	options: { apiKey: boolean; apiKeyValue?: string; importCurrent?: boolean } = { apiKey: false }
 ): Promise<void> {
 	if (providerArgument === undefined) {
-		throw new ApplicationError('USAGE', `Usage: tokenmaxx login ${cliWords} [--api-key [key]]`)
+		throw new ApplicationError(
+			'USAGE',
+			`Usage: tokenmaxx login ${cliWords} [--api-key [key] | --import]`
+		)
 	}
 	const provider = providerFromCli(providerArgument)
-	if (!options.apiKey) {
+	if (options.importCurrent && provider !== 'antigravity') {
+		throw new ApplicationError('USAGE', '--import is only supported for agy')
+	}
+	if (options.apiKey && provider === 'antigravity') {
+		throw new ApplicationError(
+			'USAGE',
+			'Antigravity uses Google account login, not API keys — run: tokenmaxx login agy'
+		)
+	}
+	if (!options.apiKey && !options.importCurrent) {
 		assertCliInstalled(provider)
 	}
 	await ensureDaemon(context)
@@ -696,14 +730,17 @@ async function login(
 			...(await promptApiKey(options.apiKeyValue))
 		})
 		process.stdout.write(`Signed in ${account.label}.\n`)
-	} else if (!(await signInOauth(context, provider))) {
+	} else if (!(await signInOauth(context, provider, { importCurrent: options.importCurrent }))) {
 		return
 	}
 	const routing = await readRouting(socket)
 	if (!routing.routed[provider]) {
 		await requestRouting(socket, provider, true).catch(() => undefined)
+		const agyEnvFile = clientConfigPaths().antigravity
 		process.stdout.write(
-			`tokenmaxx is on for ${providerArgument} — run ${providerArgument} as usual.\n`
+			provider === 'antigravity'
+				? `tokenmaxx is on for agy — open a new shell (or run: source ${agyEnvFile}) so agy uses CLOUD_CODE_URL.\n`
+				: `tokenmaxx is on for ${providerArgument} — run ${providerArgument} as usual.\n`
 		)
 	}
 }
@@ -814,14 +851,27 @@ async function orderAccounts(
 	)
 }
 
-const providerWords = new Set(['codex', 'claude', 'grok', 'openai', 'anthropic', 'xai'])
+const providerWords = new Set([
+	'codex',
+	'claude',
+	'grok',
+	'agy',
+	'openai',
+	'anthropic',
+	'xai',
+	'antigravity',
+	'google'
+])
 
 async function logout(context: ApplicationContext, arguments_: readonly string[]): Promise<void> {
 	const qualified = arguments_[0] !== undefined && providerWords.has(arguments_[0])
 	const provider = qualified ? providerFromCli(arguments_[0] as string) : undefined
 	const reference = qualified ? arguments_[1] : arguments_[0]
 	if (reference === undefined) {
-		throw new ApplicationError('USAGE', 'Usage: tokenmaxx logout [codex|claude|grok] <email-or-name>')
+		throw new ApplicationError(
+			'USAGE',
+			'Usage: tokenmaxx logout [codex|claude|grok|agy] <email-or-name>'
+		)
 	}
 	const matches = context.store
 		.listAccounts(provider)
@@ -866,7 +916,7 @@ async function configureAutomation(
 	if (providerArgument === undefined || (mode !== 'on' && mode !== 'off')) {
 		throw new ApplicationError(
 			'USAGE',
-			'Usage: tokenmaxx auto <codex|claude|grok|all> <on|off> [--threshold 95]'
+			'Usage: tokenmaxx auto <codex|claude|grok|agy|all> <on|off> [--threshold 95]'
 		)
 	}
 	const providers =
@@ -925,8 +975,9 @@ async function installConfig(context: ApplicationContext, targetArgument?: strin
 		)
 		return
 	}
+	const optionalProviders = new Set<ProviderId>(['xai', 'antigravity'])
 	const providers = ProviderIdSchema.options.filter(
-		provider => provider !== 'xai' || Bun.which(PROVIDERS.xai.cli) !== null
+		provider => !optionalProviders.has(provider) || Bun.which(PROVIDERS[provider].cli) !== null
 	)
 	for (const provider of providers) {
 		await installProviderConfig(provider, context.paths)
@@ -939,7 +990,10 @@ async function installConfig(context: ApplicationContext, targetArgument?: strin
 	)
 }
 
-async function uninstallConfig(targetArgument?: string): Promise<void> {
+async function uninstallConfig(
+	context: ApplicationContext,
+	targetArgument?: string
+): Promise<void> {
 	if (targetArgument !== undefined && targetArgument !== 'routing' && targetArgument !== 'pi') {
 		throw new ApplicationError('USAGE', 'Usage: tokenmaxx uninstall [pi|all]')
 	}
@@ -954,7 +1008,7 @@ async function uninstallConfig(targetArgument?: string): Promise<void> {
 	}
 	const restored: (string | null)[] = []
 	for (const provider of ProviderIdSchema.options) {
-		restored.push(await uninstallProviderConfig(provider))
+		restored.push(await uninstallProviderConfig(provider, context.paths))
 	}
 	const pi = await uninstallPiConfig()
 	if (pi.manual !== null)
@@ -969,15 +1023,17 @@ async function uninstallConfig(targetArgument?: string): Promise<void> {
 }
 
 async function doctor(context: ApplicationContext): Promise<void> {
+	const optionalTools = new Set<string>([PROVIDERS.xai.cli, PROVIDERS.antigravity.cli])
 	const tools = [
 		['bun', '1.2+'],
 		['codex', '0.144.1'],
 		['claude', '2.1.206'],
-		['grok', '1.0.13']
+		['grok', '1.0.13'],
+		['agy', '1.5.16']
 	] as const
 	for (const [tool, testedVersion] of tools) {
 		if (Bun.which(tool) === null) {
-			if (tool !== PROVIDERS.xai.cli) {
+			if (!optionalTools.has(tool)) {
 				process.stdout.write(`missing  ${tool}\n`)
 			}
 			continue
@@ -1014,15 +1070,20 @@ async function doctor(context: ApplicationContext): Promise<void> {
 			`${port === null ? 'warning  ' : 'ok     '}  proxy    ${port === null ? 'not listening' : `127.0.0.1:${port}`}\n`
 		)
 	}
-	const routing = await installStatus()
+	const routing = await installStatus(context.paths)
 	const routedText: Record<ProviderId, string> = {
 		anthropic: 'settings.json routes ANTHROPIC_BASE_URL through tokenmaxx',
+		antigravity: 'shell config routes CLOUD_CODE_URL through tokenmaxx',
 		openai: 'config.toml selects the tokenmaxx provider',
 		xai: 'config.toml points cli_chat_proxy_base_url at tokenmaxx'
 	}
 	for (const provider of ProviderIdSchema.options) {
 		const routed = routing.routed[provider]
-		if (provider === 'xai' && !routed && Bun.which(PROVIDERS.xai.cli) === null) {
+		if (
+			(provider === 'xai' || provider === 'antigravity') &&
+			!routed &&
+			Bun.which(PROVIDERS[provider].cli) === null
+		) {
 			continue
 		}
 		const detail = routed
@@ -1132,11 +1193,23 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
 							alert = 'this dashboard is out of date — quit and run tokenmaxx again'
 							continue
 						}
-						if (action.kind === 'relogin' || action.kind === 'login' || action.kind === 'loginApiKey') {
+						if (
+							action.kind === 'relogin' ||
+							action.kind === 'login' ||
+							action.kind === 'loginApiKey' ||
+							action.kind === 'loginImport'
+						) {
 							const cli = PROVIDERS[action.provider].cli
-							freshScreen(action.kind === 'loginApiKey' ? `add a ${cli} api key` : `sign in with ${cli}`)
+							freshScreen(
+								action.kind === 'loginApiKey'
+									? `add a ${cli} api key`
+									: action.kind === 'loginImport'
+										? `import current ${cli} login`
+										: `sign in with ${cli}`
+							)
 							await login(context, cli, {
-								apiKey: action.kind === 'loginApiKey'
+								apiKey: action.kind === 'loginApiKey',
+								importCurrent: action.kind === 'loginImport'
 							}).catch(error => {
 								alert = errorMessage(error)
 							})
@@ -1181,9 +1254,11 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
 				return 0
 			case 'login': {
 				const flagIndex = arguments_.indexOf('--api-key')
+				const importCurrent = arguments_.includes('--import')
 				await login(context, arguments_[1], {
 					apiKey: flagIndex >= 0,
-					apiKeyValue: flagIndex >= 0 ? arguments_[flagIndex + 1] : undefined
+					apiKeyValue: flagIndex >= 0 ? arguments_[flagIndex + 1] : undefined,
+					importCurrent
 				})
 				return 0
 			}
@@ -1230,7 +1305,7 @@ export async function runCli(rawArguments: readonly string[]): Promise<number> {
 			case 'uninstall':
 				if (arguments_.length > 2)
 					throw new ApplicationError('USAGE', 'Usage: tokenmaxx uninstall [pi|all]')
-				await uninstallConfig(arguments_[1])
+				await uninstallConfig(context, arguments_[1])
 				return 0
 			case 'daemon':
 				switch (arguments_[1]) {

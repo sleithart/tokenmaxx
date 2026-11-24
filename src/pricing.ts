@@ -101,6 +101,46 @@ const PRICES: ReadonlyArray<{ match: string; price: ModelPrice }> = [
 	{
 		match: 'grok-4',
 		price: { cacheReadPerMTok: 0.2, cacheWritePerMTok: 0, inputPerMTok: 1.25, outputPerMTok: 2.5 }
+	},
+	{
+		match: 'gemini-4-neon',
+		price: { cacheReadPerMTok: 0.5, cacheWritePerMTok: 0, inputPerMTok: 2.5, outputPerMTok: 15 }
+	},
+	{
+		match: 'gemini-4-hydrogen',
+		price: { cacheReadPerMTok: 0.3, cacheWritePerMTok: 0, inputPerMTok: 2, outputPerMTok: 12 }
+	},
+	{
+		match: 'gemini-4-argon',
+		price: { cacheReadPerMTok: 0.2, cacheWritePerMTok: 0, inputPerMTok: 1.25, outputPerMTok: 10 }
+	},
+	{
+		match: 'gemini-4-carbon',
+		price: { cacheReadPerMTok: 0.1, cacheWritePerMTok: 0, inputPerMTok: 0.5, outputPerMTok: 3 }
+	},
+	{
+		match: 'gemini-3.8-flash',
+		price: { cacheReadPerMTok: 0.05, cacheWritePerMTok: 0, inputPerMTok: 0.3, outputPerMTok: 2.5 }
+	},
+	{
+		match: 'gemini-3-flash',
+		price: { cacheReadPerMTok: 0.05, cacheWritePerMTok: 0, inputPerMTok: 0.3, outputPerMTok: 2.5 }
+	},
+	{
+		match: 'gemini-2.5-pro',
+		price: { cacheReadPerMTok: 0.31, cacheWritePerMTok: 0, inputPerMTok: 1.25, outputPerMTok: 10 }
+	},
+	{
+		match: 'gemini-2.5-flash',
+		price: { cacheReadPerMTok: 0.03, cacheWritePerMTok: 0, inputPerMTok: 0.15, outputPerMTok: 0.6 }
+	},
+	{
+		match: 'gemini',
+		price: { cacheReadPerMTok: 0.25, cacheWritePerMTok: 0, inputPerMTok: 1.25, outputPerMTok: 10 }
+	},
+	{
+		match: 'gpt-oss-120b',
+		price: { cacheReadPerMTok: 0.05, cacheWritePerMTok: 0, inputPerMTok: 0.2, outputPerMTok: 0.8 }
 	}
 ]
 

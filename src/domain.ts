@@ -5,11 +5,12 @@ export type FetchImplementation = (
 	initialization?: RequestInit
 ) => Promise<Response>
 
-export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'xai'])
+export const ProviderIdSchema = z.enum(['openai', 'anthropic', 'xai', 'antigravity'])
 export type ProviderId = z.infer<typeof ProviderIdSchema>
 
 export const PROVIDERS: Record<ProviderId, { vendor: string; app: string; cli: string }> = {
 	anthropic: { app: 'Claude Code', cli: 'claude', vendor: 'Anthropic' },
+	antigravity: { app: 'Antigravity', cli: 'agy', vendor: 'Google' },
 	openai: { app: 'Codex', cli: 'codex', vendor: 'OpenAI' },
 	xai: { app: 'Grok', cli: 'grok', vendor: 'xAI' }
 }
@@ -63,6 +64,12 @@ export const AccountSchema = z
 			externalUserId: z.null().default(null),
 			profilePath: z.null(),
 			provider: z.literal('xai'),
+			secretReference: z.string().trim().min(1)
+		}).strict(),
+		AccountFieldsSchema.extend({
+			externalUserId: z.null().default(null),
+			profilePath: z.null(),
+			provider: z.literal('antigravity'),
 			secretReference: z.string().trim().min(1)
 		}).strict()
 	])
@@ -136,6 +143,12 @@ export const UsageSnapshotSchema = z.discriminatedUnion('provider', [
 		measuredSpendUsd: z.number().nonnegative().nullish().default(null),
 		provider: z.literal('xai'),
 		source: z.enum(['grokProbe', 'proxyResponseHeaders', 'apiKeyProbe'])
+	}).strict(),
+	UsageSnapshotFieldsSchema.extend({
+		extraUsage: ExtraUsageSchema.nullish().default(null),
+		measuredSpendUsd: z.number().nonnegative().nullish().default(null),
+		provider: z.literal('antigravity'),
+		source: z.enum(['antigravityProbe', 'proxyResponseHeaders'])
 	}).strict()
 ])
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>

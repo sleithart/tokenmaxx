@@ -8,7 +8,8 @@ export interface UpstreamInjection {
 	headers: Record<string, string>
 	appendHeaders?: Record<string, string>
 	stripHeaders?: readonly string[]
-	dialect?: 'chatgpt'
+	dialect?: 'chatgpt' | 'antigravity'
+	projectId?: string
 }
 
 interface ProxyCredentialSource {
@@ -51,12 +52,27 @@ interface SseUsage {
 	input_tokens_details?: { cached_tokens?: number }
 }
 
+interface GeminiUsageMetadata {
+	promptTokenCount?: number
+	candidatesTokenCount?: number
+	cachedContentTokenCount?: number
+	thoughtsTokenCount?: number
+	totalTokenCount?: number
+}
+
 interface SseEvent {
 	type?: string
 	model?: string
+	modelVersion?: string
 	message?: { model?: string; usage?: SseUsage }
 	usage?: SseUsage
-	response?: { model?: string; usage?: SseUsage }
+	usageMetadata?: GeminiUsageMetadata
+	response?: {
+		model?: string
+		modelVersion?: string
+		usage?: SseUsage
+		usageMetadata?: GeminiUsageMetadata
+	}
 }
 
 export function createUsageObserver(
@@ -105,6 +121,24 @@ export function createUsageObserver(
 				cacheCreation += event.usage.cache_creation_input_tokens ?? 0
 				cacheRead += event.usage.cache_read_input_tokens ?? 0
 				output += event.usage.output_tokens ?? 0
+				saw = true
+			}
+			return
+		}
+		if (provider === 'antigravity') {
+			const meta = event.response?.usageMetadata ?? event.usageMetadata
+			if (meta !== undefined) {
+				const cached = meta.cachedContentTokenCount ?? 0
+				const prompt = meta.promptTokenCount ?? 0
+				const candidates = meta.candidatesTokenCount ?? 0
+				const thoughts = meta.thoughtsTokenCount ?? 0
+				const total = meta.totalTokenCount
+				const outputIncludesThoughts =
+					total !== undefined && thoughts > 0 && prompt + candidates === total
+				input = Math.max(0, prompt - cached)
+				cacheRead = cached
+				output = outputIncludesThoughts ? candidates : candidates + thoughts
+				model = event.response?.modelVersion ?? event.modelVersion ?? model
 				saw = true
 			}
 			return
@@ -269,6 +303,25 @@ export function adaptChatGptRequest(raw: string): string {
 	})
 }
 
+// Antigravity Cloud Code requests carry the signed-in account's Cloud project id
+// at the top level of the JSON payload. Rewrite it when proxying so mid-turn
+// account switches match the injected OAuth token.
+export function adaptAntigravityRequest(raw: string, projectId: string): string {
+	let parsed: Record<string, unknown>
+	try {
+		parsed = JSON.parse(raw) as Record<string, unknown>
+	} catch {
+		return raw
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		return raw
+	}
+	if (typeof parsed.project !== 'string') {
+		return raw
+	}
+	return JSON.stringify({ ...parsed, project: projectId })
+}
+
 const strippedRequestHeaders = [
 	'host',
 	'connection',
@@ -380,9 +433,13 @@ function createProxyHandler(options: ProxyOptions): ProxyHandler {
 			const send = (injection: UpstreamInjection): Promise<Response> =>
 				doFetch(`${injection.baseUrl.replace(/\/$/, '')}${route.rest}${url.search}`, {
 					body:
-						injection.dialect === 'chatgpt' && body !== undefined
-							? adaptChatGptRequest(new TextDecoder().decode(body))
-							: body,
+						body === undefined
+							? undefined
+							: injection.dialect === 'chatgpt'
+								? adaptChatGptRequest(new TextDecoder().decode(body))
+								: injection.dialect === 'antigravity' && injection.projectId !== undefined
+									? adaptAntigravityRequest(new TextDecoder().decode(body), injection.projectId)
+									: body,
 					headers: forwardHeaders(request.headers, injection),
 					method: request.method,
 					redirect: 'manual',
@@ -560,5 +617,7 @@ export function upstreamFor(provider: ProviderId): string {
 			return 'https://api.anthropic.com'
 		case 'xai':
 			return 'https://cli-chat-proxy.grok.com'
+		case 'antigravity':
+			return 'https://daily-cloudcode-pa.googleapis.com'
 	}
 }

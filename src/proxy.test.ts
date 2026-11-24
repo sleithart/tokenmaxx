@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { adaptChatGptRequest, createUsageObserver, proxyIdentity, startProxy } from './proxy.ts'
+import {
+	adaptAntigravityRequest,
+	adaptChatGptRequest,
+	createUsageObserver,
+	proxyIdentity,
+	startProxy
+} from './proxy.ts'
 
 type Observed = {
 	model: string | null
@@ -9,7 +15,11 @@ type Observed = {
 	cacheCreationTokens: number
 }
 
-function observe(provider: 'openai' | 'anthropic', body: string, chunkSize = 7): Observed | null {
+function observe(
+	provider: 'openai' | 'anthropic' | 'antigravity',
+	body: string,
+	chunkSize = 7
+): Observed | null {
 	let seen: Observed | null = null
 	const observer = createUsageObserver(provider, usage => {
 		seen = usage
@@ -175,6 +185,104 @@ describe('createUsageObserver', () => {
 		const body =
 			'data: {"type":"response.completed","response":{"model":"gpt-5.6-sol","usage":{"input_tokens":10,"output_tokens":2}}}'
 		expect(observe('openai', body)?.outputTokens).toBe(2)
+	})
+
+	test('antigravity SSE stream parses usageMetadata and separates cached input', () => {
+		const body = [
+			'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":20000,"cachedContentTokenCount":12000,"candidatesTokenCount":10,"thoughtsTokenCount":25,"totalTokenCount":20035},"modelVersion":"gemini-3.8-flash"}}',
+			'',
+			'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":" there"}]}}],"usageMetadata":{"promptTokenCount":20000,"cachedContentTokenCount":12000,"candidatesTokenCount":40,"thoughtsTokenCount":25,"totalTokenCount":20065},"modelVersion":"gemini-3.8-flash"}}',
+			''
+		].join('\n')
+		expect(observe('antigravity', body)).toEqual({
+			cacheCreationTokens: 0,
+			cacheReadTokens: 12000,
+			inputTokens: 8000,
+			model: 'gemini-3.8-flash',
+			outputTokens: 65
+		})
+	})
+})
+
+describe('antigravity project rewrite', () => {
+	test('rewrites top-level project string while leaving other payloads untouched', () => {
+		const body = JSON.stringify({
+			model: 'gemini-3.8-flash-low',
+			project: 'account-a-project',
+			request: { contents: [] }
+		})
+		const adapted = JSON.parse(adaptAntigravityRequest(body, 'account-b-project'))
+		expect(adapted.project).toBe('account-b-project')
+		expect(adapted.model).toBe('gemini-3.8-flash-low')
+
+		const noProject = JSON.stringify({ metadata: { ideType: 'IDE_UNSPECIFIED' } })
+		expect(adaptAntigravityRequest(noProject, 'account-b-project')).toBe(noProject)
+		expect(adaptAntigravityRequest('not json', 'account-b-project')).toBe('not json')
+	})
+
+	test('proxy rewrites project and retries 429 on the next antigravity account', async () => {
+		const seen: Array<{ auth: string | null; project: string | null }> = []
+		let active = 0
+		const upstream = Bun.serve({
+			async fetch(request) {
+				const parsed = (await request.json()) as { project?: string }
+				seen.push({
+					auth: request.headers.get('authorization'),
+					project: parsed.project ?? null
+				})
+				if (seen.length === 1) {
+					return new Response('{"error":{"code":429}}', {
+						headers: { 'content-type': 'application/json', 'retry-after': '60' },
+						status: 429
+					})
+				}
+				return new Response(
+					'data: {"response":{"candidates":[],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":5,"totalTokenCount":105},"modelVersion":"gemini-3.8-flash"}}\n\n',
+					{ headers: { 'content-type': 'text/event-stream' }, status: 200 }
+				)
+			},
+			hostname: '127.0.0.1',
+			port: 0
+		})
+		const accounts = [
+			{ accountId: 'acct-a', projectId: 'proj-a', token: 'tok-a' },
+			{ accountId: 'acct-b', projectId: 'proj-b', token: 'tok-b' }
+		]
+		const proxy = startProxy({
+			observeLimits: () => {
+				active = 1
+			},
+			source: {
+				refresh: async () => undefined,
+				resolve: async () => {
+					const current = accounts[active]
+					if (current === undefined) return null
+					return {
+						accountId: current.accountId,
+						baseUrl: `http://127.0.0.1:${upstream.port}`,
+						dialect: 'antigravity',
+						headers: { authorization: `Bearer ${current.token}` },
+						projectId: current.projectId
+					}
+				}
+			}
+		})
+		const response = await fetch(
+			`http://127.0.0.1:${proxy.port}/antigravity/v1internal:streamGenerateContent?alt=sse`,
+			{
+				body: JSON.stringify({ model: 'gemini-3.8-flash-low', project: 'stale-project' }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		)
+		expect(response.status).toBe(200)
+		await response.text()
+		expect(seen).toEqual([
+			{ auth: 'Bearer tok-a', project: 'proj-a' },
+			{ auth: 'Bearer tok-b', project: 'proj-b' }
+		])
+		await proxy.stop()
+		await upstream.stop(true)
 	})
 })
 

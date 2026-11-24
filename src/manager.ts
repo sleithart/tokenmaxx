@@ -1,3 +1,4 @@
+import { type AntigravityKeychain, antigravityUpstream, probeAntigravity } from './antigravity.ts'
 import {
 	claudeResetCredits,
 	claudeUpstream,
@@ -118,6 +119,7 @@ function priceTokenTimeframe(aggregate: TokenTimeframeAggregate): TokenTimeframe
 }
 
 interface ManagerDependencies {
+	antigravityKeychain?: AntigravityKeychain
 	fetchImplementation: FetchImplementation
 	now(): Date
 }
@@ -203,6 +205,12 @@ export class AccountManager {
 					return await claudeUpstream({ account, ...shared })
 				case 'xai':
 					return await grokUpstream({ account, ...shared })
+				case 'antigravity':
+					return await antigravityUpstream({
+						account,
+						keychain: this.#dependencies.antigravityKeychain,
+						...shared
+					})
 			}
 		} catch (error) {
 			const cause = error instanceof Error ? error : undefined
@@ -361,6 +369,11 @@ export class AccountManager {
 					return registerClaudeApiKeyAccount(registration)
 				case 'xai':
 					return registerXaiApiKeyAccount(registration)
+				case 'antigravity':
+					throw new ApplicationError(
+						'USAGE',
+						'Antigravity uses Google account login, not API keys — run: tokenmaxx login agy'
+					)
 			}
 		})()
 		await this.saveAccount({ account, removePrevious: { profilePath: null, secretReference: null } })
@@ -459,6 +472,14 @@ export class AccountManager {
 					return probeClaude({ account, ...shared })
 				case 'xai':
 					return probeGrok({ account, existing: this.#store.findUsage(account.id), ...shared })
+				case 'antigravity':
+					return probeAntigravity({
+						account,
+						existing: this.#store.findUsage(account.id),
+						isActive: this.#store.findProviderState('antigravity').activeAccountId === account.id,
+						keychain: this.#dependencies.antigravityKeychain,
+						...shared
+					})
 			}
 		})()
 		if (account.auth === 'apiKey') {
@@ -492,6 +513,7 @@ export class AccountManager {
 			case 'anthropic':
 				return claudeResetCredits({ account, ...shared })
 			case 'xai':
+			case 'antigravity':
 				return { available: 0, credits: [] }
 		}
 	}
@@ -512,6 +534,7 @@ export class AccountManager {
 					case 'anthropic':
 						return redeemClaudeReset({ account, requestId, ...shared })
 					case 'xai':
+					case 'antigravity':
 						return { code: 'no_credit', windowsReset: 0 } as const
 				}
 			})()

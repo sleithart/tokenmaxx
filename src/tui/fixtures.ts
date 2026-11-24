@@ -204,6 +204,14 @@ function account(seed: AccountSeed, now: number): Account {
 				provider: 'xai',
 				secretReference: `grok:${base.externalAccountId}`
 			}
+		case 'antigravity':
+			return {
+				...base,
+				externalUserId: null,
+				profilePath: null,
+				provider: 'antigravity',
+				secretReference: `antigravity:${base.externalAccountId}`
+			}
 	}
 }
 
@@ -227,6 +235,8 @@ function usage(seed: AccountSeed, now: number): UsageSnapshot {
 			return { ...base, provider: 'anthropic', source: 'claudeUsageEndpoint' }
 		case 'xai':
 			return { ...base, provider: 'xai', source: 'grokProbe' }
+		case 'antigravity':
+			return { ...base, provider: 'antigravity', source: 'antigravityProbe' }
 	}
 }
 

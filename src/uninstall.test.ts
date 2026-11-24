@@ -24,6 +24,7 @@ beforeEach(async () => {
 		CODEX_HOME: join(directory, 'codex'),
 		GROK_HOME: join(directory, 'grok'),
 		PI_CODING_AGENT_DIR: join(directory, 'pi'),
+		TOKENMAXX_AGY_ENV_FILE: join(directory, 'fish', 'conf.d', 'tokenmaxx.fish'),
 		TOKENMAXX_HOME: join(directory, 'state')
 	}
 	savedEnvironment = { ...process.env }

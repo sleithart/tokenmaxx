@@ -65,9 +65,19 @@ export function launchAgentFiles(input: LaunchAgentOptions) {
 		TOKENMAXX_HOME: input.paths.root,
 		TOKENMAXX_PROXY_PORT: String(input.paths.proxyPort)
 	}
-	for (const key of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'GROK_HOME', 'PI_CODING_AGENT_DIR']) {
+	for (const key of [
+		'CODEX_HOME',
+		'CLAUDE_CONFIG_DIR',
+		'GROK_HOME',
+		'PI_CODING_AGENT_DIR',
+		'TOKENMAXX_AGY_ENV_FILE',
+		'ZDOTDIR'
+	]) {
 		const value = input.environment[key]
 		if (value !== undefined) environment[key] = resolve(value)
+	}
+	if (input.environment.SHELL !== undefined) {
+		environment.SHELL = input.environment.SHELL
 	}
 	const logPath = join(input.paths.runtime, 'daemon.log')
 	return {

@@ -85,7 +85,9 @@ function shownProviders(
 ): ProviderId[] {
 	return providerOrder.filter(
 		provider =>
-			provider !== 'xai' || clis.xai || snapshot.accounts.some(account => account.provider === 'xai')
+			(provider !== 'xai' && provider !== 'antigravity') ||
+			clis[provider] ||
+			snapshot.accounts.some(account => account.provider === provider)
 	)
 }
 const providerTitle = (provider: ProviderId) =>
@@ -980,7 +982,9 @@ function settingsPanel(
 								: 'shown'
 		const hint =
 			row.key === 'routing'
-				? `run ${providerCli(row.provider)} through tokenmaxx`
+				? row.provider === 'antigravity'
+					? 'route agy CLOUD_CODE_URL through tokenmaxx'
+					: `run ${providerCli(row.provider)} through tokenmaxx`
 				: row.key === 'auto'
 					? 'switch accounts as the active one fills'
 					: row.key === 'threshold'
@@ -1114,7 +1118,7 @@ interface ResetConfirm {
 
 interface AddConfirm {
 	provider: ProviderId
-	choice: 'oauth' | 'apiKey'
+	choice: 'oauth' | 'apiKey' | 'import'
 }
 
 function addConfirmBody(ctx: Ctx, confirm: AddConfirm) {
@@ -1141,6 +1145,16 @@ function addConfirmBody(ctx: Ctx, confirm: AddConfirm) {
 		),
 		...details.map(detail => line(Text({ content: `  ${detail}`, fg: rgb(ctx.theme.dim) })))
 	]
+	const secondOption =
+		confirm.provider === 'antigravity'
+			? option(confirm.choice === 'import', 'import current agy login', null, [
+					'copies the account already signed into agy on this Mac',
+					'no browser sign-in needed'
+				])
+			: option(confirm.choice === 'apiKey', 'add an api key', null, [
+					'bills per token at api rates; account limits do not apply',
+					'finishes in the terminal: paste the key, name the account'
+				])
 	const body = Box(
 		{
 			border: true,
@@ -1159,10 +1173,7 @@ function addConfirmBody(ctx: Ctx, confirm: AddConfirm) {
 			['your subscription account; its rate-limit windows meter here']
 		),
 		blankRow(ctx),
-		...option(confirm.choice === 'apiKey', 'add an api key', null, [
-			'bills per token at api rates; account limits do not apply',
-			'finishes in the terminal: paste the key, name the account'
-		]),
+		...secondOption,
 		blankRow(ctx),
 		line(
 			Text({ attributes: 1, bg: rgb(ctx.theme.selected), content: ' ⏎ ', fg: rgb(ctx.theme.fg) }),
@@ -1271,6 +1282,7 @@ type DashboardAction =
 	| { kind: 'relogin'; provider: ProviderId }
 	| { kind: 'login'; provider: ProviderId }
 	| { kind: 'loginApiKey'; provider: ProviderId }
+	| { kind: 'loginImport'; provider: ProviderId }
 	| { kind: 'update'; version: string }
 
 function view(ctx: Ctx, analytics: AnalyticsSnapshot, rows: Row[], state: ViewState) {
@@ -1458,10 +1470,15 @@ export async function runTuiDashboard(
 		fixture === undefined
 			? await readRouting(socketPath)
 			: {
-					clis: { anthropic: true, openai: true, xai: true },
+					clis: { anthropic: true, antigravity: false, openai: true, xai: true },
 					codexStale: false,
 					pi: { present: true, routed: true },
-					routed: { anthropic: fixture.routed, openai: fixture.routed, xai: fixture.routed }
+					routed: {
+						anthropic: fixture.routed,
+						antigravity: false,
+						openai: fixture.routed,
+						xai: fixture.routed
+					}
 				}
 	const renderer =
 		options.renderer ?? (await createCliRenderer({ exitOnCtrlC: false, targetFps: 30 }))
@@ -1902,16 +1919,22 @@ export async function runTuiDashboard(
 					if (key.ctrl && key.name === 'c') {
 						finish()
 					} else if (key.name === 'up' || key.name === 'down' || key.name === 'k' || key.name === 'j') {
+						const alt = confirm.provider === 'antigravity' ? 'import' : 'apiKey'
 						state.addConfirm = {
 							...confirm,
-							choice: confirm.choice === 'oauth' ? 'apiKey' : 'oauth'
+							choice: confirm.choice === 'oauth' ? alt : 'oauth'
 						}
 						paint()
 					} else if (key.name === 'return') {
 						state.addConfirm = null
 						if (live) {
 							finish({
-								kind: confirm.choice === 'apiKey' ? 'loginApiKey' : 'login',
+								kind:
+									confirm.choice === 'apiKey'
+										? 'loginApiKey'
+										: confirm.choice === 'import'
+											? 'loginImport'
+											: 'login',
 								provider: confirm.provider
 							})
 						} else {
@@ -2004,7 +2027,14 @@ export async function runTuiDashboard(
 					const row = rows[state.selected]
 					if (row !== undefined && row.accountId === ADD_ROW) {
 						state.addConfirm = {
-							choice: routing.clis[row.provider] ? 'oauth' : 'apiKey',
+							choice:
+								row.provider === 'antigravity'
+									? routing.clis[row.provider]
+										? 'oauth'
+										: 'import'
+									: routing.clis[row.provider]
+										? 'oauth'
+										: 'apiKey',
 							provider: row.provider
 						}
 						paint()

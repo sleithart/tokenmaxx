@@ -40,6 +40,7 @@ beforeEach(async () => {
 	process.env.CODEX_HOME = join(home, 'codex')
 	process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
 	process.env.PI_CODING_AGENT_DIR = join(home, 'pi')
+	process.env.TOKENMAXX_AGY_ENV_FILE = join(home, 'fish', 'conf.d', 'tokenmaxx.fish')
 	await mkdir(process.env.CODEX_HOME, { recursive: true })
 	await mkdir(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
 	const paths = applicationPaths({ ...process.env, TOKENMAXX_HOME: join(home, 'state') })
@@ -60,14 +61,16 @@ afterEach(async () => {
 	delete process.env.CODEX_HOME
 	delete process.env.CLAUDE_CONFIG_DIR
 	delete process.env.PI_CODING_AGENT_DIR
+	delete process.env.TOKENMAXX_AGY_ENV_FILE
 	secrets.clear()
 	rmSync(home, { force: true, recursive: true })
 })
 
 describe('routing over ipc', () => {
-	test('reads and toggles codex and claude routing', async () => {
+	test('reads and toggles codex, claude, and antigravity routing', async () => {
 		expect((await readRouting(socketPath)).routed).toEqual({
 			anthropic: false,
+			antigravity: false,
 			openai: false,
 			xai: false
 		})
@@ -79,6 +82,11 @@ describe('routing over ipc', () => {
 
 		const off = await requestRouting(socketPath, 'anthropic', false)
 		expect(off.routed.anthropic).toBe(false)
+
+		const agyOn = await requestRouting(socketPath, 'antigravity', true)
+		expect(agyOn.routed.antigravity).toBe(true)
+		const agyOff = await requestRouting(socketPath, 'antigravity', false)
+		expect(agyOff.routed.antigravity).toBe(false)
 	})
 
 	test('routes pi and refuses to touch a models.json it cannot parse', async () => {

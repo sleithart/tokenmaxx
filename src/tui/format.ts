@@ -387,6 +387,12 @@ export function shortWindow(label: string): string {
 	if (/^7 day( · all models)?$/i.test(label)) {
 		return '7d'
 	}
+	const agy = label.match(/^(gemini|claude|gpt)\s+(5h|7d)$/i)
+	if (agy?.[1] !== undefined && agy[2] !== undefined) {
+		const prefix =
+			agy[1].toLowerCase() === 'gemini' ? 'Gem' : agy[1].toLowerCase() === 'claude' ? 'Cld' : 'GPT'
+		return `${prefix} ${agy[2].toLowerCase()}`
+	}
 	const generic = new Set(['day', 'days', 'hour', 'hours', 'week', 'all', 'models', 'window'])
 	const tokens = label
 		.replace(/^7 day · /i, '')
