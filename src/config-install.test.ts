@@ -43,6 +43,7 @@ beforeEach(async () => {
 	process.env.CODEX_HOME = join(home, 'codex')
 	process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
 	process.env.GROK_HOME = join(home, 'grok')
+	process.env.TOKENMAXX_AGY_ENV_FILE = join(home, 'fish', 'conf.d', 'tokenmaxx.fish')
 	process.env.TOKENMAXX_HOME = join(home, 'state')
 	await mkdir(process.env.CODEX_HOME, { recursive: true })
 	await mkdir(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
@@ -53,6 +54,7 @@ afterEach(() => {
 	delete process.env.CODEX_HOME
 	delete process.env.CLAUDE_CONFIG_DIR
 	delete process.env.GROK_HOME
+	delete process.env.TOKENMAXX_AGY_ENV_FILE
 	delete process.env.TOKENMAXX_HOME
 	rmSync(home, { force: true, recursive: true })
 })

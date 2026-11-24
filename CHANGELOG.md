@@ -1,4 +1,5 @@
-- [2026-11-24] add antigravity CLI keychain switching and quota monitoring
+- [2026-11-24] switch antigravity integration to local HTTP proxy with mid-turn rotation
+- [2026-11-24] [add antigravity CLI keychain switching and quota monitoring](https://github.com/RubricLab/tokenmaxx/commit/b1f906e92d920229fbfe6fea9c6c873040c60cd5)
 - [2026-10-30] the login daemon runs at interactive priority, so the dashboard stops timing out
 - [2026-10-28] analytics reads a per-minute rollup, so an open dashboard stops freezing the daemon
 - [2026-10-14] the dashboard fits the terminal it runs in

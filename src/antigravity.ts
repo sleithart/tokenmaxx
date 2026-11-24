@@ -11,18 +11,22 @@ import {
 	type UsageWindow
 } from './domain.ts'
 import { ApplicationError, loginFailureMessage } from './errors.ts'
+import { type UpstreamInjection, upstreamFor } from './proxy.ts'
+import { antigravityLimitWindowId } from './ratelimit.ts'
 import { type CredentialVault, exclusive } from './vault.ts'
 
 const nativeKeychainService = 'gemini'
 const nativeKeychainAccount = 'antigravity'
+const nativeKeychainLock = 'antigravity:native-keychain'
 const goKeyringBase64Prefix = 'go-keyring-base64:'
 const cloudCodeBase = 'https://daily-cloudcode-pa.googleapis.com'
 const loadCodeAssistEndpoint = `${cloudCodeBase}/v1internal:loadCodeAssist`
 const fetchAvailableModelsEndpoint = `${cloudCodeBase}/v1internal:fetchAvailableModels`
+const retrieveUserQuotaSummaryEndpoint = `${cloudCodeBase}/v1internal:retrieveUserQuotaSummary`
 const userinfoEndpoint = 'https://www.googleapis.com/oauth2/v2/userinfo'
 const oauthTokenEndpoint = 'https://oauth2.googleapis.com/token'
 const refreshMarginMilliseconds = 120_000
-const userAgent = 'antigravity/1.5.16'
+const fallbackCliVersion = '1.5.16'
 
 const AntigravityTokenSchema = z
 	.object({
@@ -37,6 +41,7 @@ const AntigravityTokenSchema = z
 export const AntigravityAuthSchema = z
 	.object({
 		auth_method: z.string().optional(),
+		cloudaicompanion_project: z.string().min(1).nullish(),
 		id_token_email: z.string().optional(),
 		token: AntigravityTokenSchema
 	})
@@ -67,6 +72,29 @@ const LoadCodeAssistResponseSchema = z
 			.nullish(),
 		currentTier: z.object({ id: z.string().optional() }).passthrough().nullish(),
 		paidTier: z.object({ id: z.string().optional() }).passthrough().nullish()
+	})
+	.passthrough()
+
+const QuotaBucketSchema = z
+	.object({
+		bucketId: z.string().min(1),
+		displayName: z.string().optional(),
+		remainingFraction: z.number().min(0).max(1),
+		resetTime: z.string().nullish(),
+		window: z.string().optional()
+	})
+	.passthrough()
+
+const QuotaGroupSchema = z
+	.object({
+		buckets: z.array(QuotaBucketSchema).optional(),
+		displayName: z.string().optional()
+	})
+	.passthrough()
+
+const RetrieveQuotaSummaryResponseSchema = z
+	.object({
+		groups: z.array(QuotaGroupSchema).optional()
 	})
 	.passthrough()
 
@@ -209,8 +237,32 @@ function defaultLoginDependencies(): AntigravityLoginDependencies {
 	}
 }
 
+let agyUserAgentPromise: Promise<string> | undefined
+
+async function resolveAgyUserAgent(): Promise<string> {
+	const binary = Bun.which('agy')
+	let version = fallbackCliVersion
+	if (binary !== null) {
+		try {
+			const child = Bun.spawn([binary, '--version'], {
+				stderr: 'ignore',
+				stdin: 'ignore',
+				stdout: 'pipe',
+				timeout: 5_000
+			})
+			const parsed = /^\d+\.\d+\.\d+/.exec((await new Response(child.stdout).text()).trim())?.[0]
+			if (parsed !== undefined) {
+				version = parsed
+			}
+		} catch {}
+	}
+	return `antigravity/cli/${version} (aidev_client; os_type=${process.platform}; arch=${process.arch}; auth_method=consumer)`
+}
+
 export function encodeAntigravityKeychainPayload(credential: AntigravityAuth): string {
-	const encoded = Buffer.from(JSON.stringify(credential), 'utf8').toString('base64')
+	// Keep only native agy fields when writing back to the OS Keychain.
+	const { cloudaicompanion_project: _project, ...nativePayload } = credential
+	const encoded = Buffer.from(JSON.stringify(nativePayload), 'utf8').toString('base64')
 	return `${goKeyringBase64Prefix}${encoded}`
 }
 
@@ -269,6 +321,59 @@ function clampPercent(value: number): number {
 	return Math.max(0, Math.min(100, Math.round(value * 10) / 10))
 }
 
+const summaryBucketOrder: Record<string, number> = {
+	'3p-5h': 2,
+	'3p-weekly': 3,
+	'gemini-5h': 0,
+	'gemini-weekly': 1
+}
+
+function summaryBucketLabel(
+	bucketId: string,
+	groupName: string | undefined,
+	window: string | undefined
+): string {
+	const id = bucketId.toLowerCase()
+	if (id === 'gemini-5h') return 'Gemini 5h'
+	if (id === 'gemini-weekly') return 'Gemini 7d'
+	if (id === '3p-5h') return 'Claude 5h'
+	if (id === '3p-weekly') return 'Claude 7d'
+	const group = groupName?.toLowerCase().includes('gemini')
+		? 'Gemini'
+		: groupName?.toLowerCase().includes('claude') || id.startsWith('3p')
+			? 'Claude'
+			: (groupName?.trim() ?? bucketId)
+	const span = window === 'weekly' ? '7d' : window === '5h' ? '5h' : (window ?? '')
+	return span.length > 0 ? `${group} ${span}` : group
+}
+
+export function extractAntigravityQuotaSummaryWindows(
+	body: z.infer<typeof RetrieveQuotaSummaryResponseSchema>
+): UsageWindow[] {
+	const windows: Array<{ order: number; window: UsageWindow }> = []
+	for (const group of body.groups ?? []) {
+		for (const bucket of group.buckets ?? []) {
+			const id = bucket.bucketId.trim()
+			if (id.length === 0) {
+				continue
+			}
+			windows.push({
+				order: summaryBucketOrder[id.toLowerCase()] ?? 100,
+				window: {
+					id: `antigravity:${id}`,
+					kind: 'hard',
+					label: summaryBucketLabel(id, group.displayName, bucket.window),
+					resetAt: isoOrNull(bucket.resetTime),
+					usedPercent: clampPercent((1 - bucket.remainingFraction) * 100)
+				}
+			})
+		}
+	}
+	return windows
+		.sort((left, right) => left.order - right.order || left.window.id.localeCompare(right.window.id))
+		.map(entry => entry.window)
+}
+
 type QuotaBucketKey = 'gemini' | 'claude' | 'gpt' | 'other'
 
 function classifyModelBucket(modelId: string): QuotaBucketKey | null {
@@ -289,9 +394,9 @@ function classifyModelBucket(modelId: string): QuotaBucketKey | null {
 }
 
 const bucketLabels: Record<QuotaBucketKey, string> = {
-	claude: 'Claude',
-	gemini: 'Gemini',
-	gpt: 'GPT',
+	claude: 'Claude 5h',
+	gemini: 'Gemini 5h',
+	gpt: 'GPT 5h',
 	other: 'Models'
 }
 
@@ -359,9 +464,9 @@ export function extractAntigravityWindows(
 
 function defaultAntigravityWindow(): UsageWindow {
 	return {
-		id: 'antigravity:gemini',
+		id: 'antigravity:gemini-5h',
 		kind: 'hard',
-		label: 'Gemini',
+		label: 'Gemini 5h',
 		resetAt: null,
 		usedPercent: 0
 	}
@@ -409,11 +514,12 @@ async function fetchUserinfo(
 	return { email: parsed.email ?? null, id: parsed.id ?? parsed.sub ?? null }
 }
 
-function cloudCodeHeaders(accessToken: string): Record<string, string> {
+async function cloudCodeHeaders(accessToken: string): Promise<Record<string, string>> {
+	agyUserAgentPromise ??= resolveAgyUserAgent()
 	return {
 		Authorization: `Bearer ${accessToken}`,
 		'Content-Type': 'application/json',
-		'User-Agent': userAgent
+		'User-Agent': await agyUserAgentPromise
 	}
 }
 
@@ -429,7 +535,7 @@ async function fetchCodeAssistStatus(
 				pluginType: 'GEMINI'
 			}
 		}),
-		headers: cloudCodeHeaders(accessToken),
+		headers: await cloudCodeHeaders(accessToken),
 		method: 'POST',
 		signal: AbortSignal.timeout(10_000)
 	})
@@ -457,6 +563,33 @@ async function fetchCodeAssistStatus(
 	return { plan, project }
 }
 
+async function fetchQuotaSummary(
+	accessToken: string,
+	project: string | null,
+	fetchImplementation: FetchImplementation
+): Promise<UsageWindow[]> {
+	const response = await fetchImplementation(retrieveUserQuotaSummaryEndpoint, {
+		body: JSON.stringify(project === null ? {} : { project }),
+		headers: await cloudCodeHeaders(accessToken),
+		method: 'POST',
+		signal: AbortSignal.timeout(10_000)
+	})
+	if (response.status === 401) {
+		throw new ApplicationError('ACCESS_TOKEN_REJECTED', 'Antigravity access token was rejected')
+	}
+	if (response.status === 429) {
+		throw new ApplicationError(
+			'USAGE_RATE_LIMITED',
+			'Antigravity quota endpoint rate-limited the probe'
+		)
+	}
+	if (!response.ok) {
+		return []
+	}
+	const body = RetrieveQuotaSummaryResponseSchema.parse(await response.json())
+	return extractAntigravityQuotaSummaryWindows(body)
+}
+
 async function fetchAvailableModels(
 	accessToken: string,
 	project: string | null,
@@ -464,7 +597,7 @@ async function fetchAvailableModels(
 ): Promise<UsageWindow[]> {
 	const response = await fetchImplementation(fetchAvailableModelsEndpoint, {
 		body: JSON.stringify(project === null ? {} : { project }),
-		headers: cloudCodeHeaders(accessToken),
+		headers: await cloudCodeHeaders(accessToken),
 		method: 'POST',
 		signal: AbortSignal.timeout(10_000)
 	})
@@ -495,7 +628,12 @@ export async function defaultRefreshViaAgyCli(): Promise<void> {
 	const tempDir = await mkdtemp(join(tmpdir(), 'tokenmaxx-agy-refresh-'))
 	try {
 		const logFile = join(tempDir, 'acp.log')
+		// Unset CLOUD_CODE_URL so the refresh handshake talks directly to Google
+		// instead of looping back through tokenmaxx's own proxy.
+		const env = { ...process.env }
+		delete env.CLOUD_CODE_URL
 		const child = Bun.spawn([binary, 'acp', '--gemini-dir', tempDir, '--log-file', logFile], {
+			env,
 			stderr: 'ignore',
 			stdin: 'pipe',
 			stdout: 'pipe'
@@ -522,7 +660,7 @@ export async function defaultRefreshViaAgyCli(): Promise<void> {
 			try {
 				child.kill()
 			} catch {}
-		}, 10_000)
+		}, 12_000)
 		try {
 			while (!finished) {
 				const { done, value } = await reader.read()
@@ -583,36 +721,29 @@ export async function syncActiveAntigravityFromKeychain(input: {
 	}
 	const storedExpiry = tokenExpiryMillis(stored) ?? 0
 	const liveExpiry = tokenExpiryMillis(live) ?? 0
-	if (liveExpiry > storedExpiry || live.token.access_token !== stored.token.access_token) {
-		if (liveExpiry >= storedExpiry) {
-			await input.vault.write(input.account.secretReference, JSON.stringify(live))
-			return live
+	if (liveExpiry > storedExpiry) {
+		const merged: AntigravityAuth = {
+			...live,
+			...(stored.cloudaicompanion_project
+				? { cloudaicompanion_project: stored.cloudaicompanion_project }
+				: {})
 		}
+		await input.vault.write(input.account.secretReference, JSON.stringify(merged))
+		return merged
 	}
 	return stored
-}
-
-export async function activateAntigravityAccount(input: {
-	account: Extract<Account, { provider: 'antigravity' }>
-	vault: CredentialVault
-	keychain?: AntigravityKeychain
-}): Promise<void> {
-	const credential = await readStoredCredential(input.vault, input.account.secretReference)
-	const keychain = input.keychain ?? createNativeAntigravityKeychain()
-	await keychain.write(encodeAntigravityKeychainPayload(credential))
 }
 
 export async function refreshAntigravityCredential(input: {
 	reference: string
 	identity: string
 	vault: CredentialVault
-	isActive: boolean
 	keychain?: AntigravityKeychain
 	fetchImplementation?: FetchImplementation
 	refreshViaCli?: () => Promise<void>
 	environment?: NodeJS.ProcessEnv
 	staleAccessToken?: string
-}): Promise<AntigravityAuth | null> {
+}): Promise<AntigravityAuth> {
 	return exclusive(input.reference, async () => {
 		const current = await readStoredCredential(input.vault, input.reference)
 		if (
@@ -661,41 +792,72 @@ export async function refreshAntigravityCredential(input: {
 				}
 			})
 			await input.vault.write(input.reference, JSON.stringify(updated))
-			if (input.isActive) {
-				const keychain = input.keychain ?? createNativeAntigravityKeychain()
-				await keychain.write(encodeAntigravityKeychainPayload(updated)).catch(() => undefined)
-			}
 			return updated
 		}
-		if (!input.isActive) {
-			return null
-		}
-		const keychain = input.keychain ?? createNativeAntigravityKeychain()
-		await (input.refreshViaCli ?? defaultRefreshViaAgyCli)()
-		const raw = await keychain.read().catch(() => null)
-		if (raw === null) {
-			return null
-		}
-		const live = decodeAntigravityKeychainPayload(raw)
-		const liveEmail = AccountEmailSchema.safeParse(live.id_token_email)
-		if (liveEmail.success && liveEmail.data !== input.identity) {
-			return null
-		}
-		if (
-			live.token.access_token === current.token.access_token &&
-			(tokenExpiryMillis(live) ?? 0) <= (tokenExpiryMillis(current) ?? 0)
-		) {
-			return null
-		}
-		await input.vault.write(input.reference, JSON.stringify(live))
-		return live
+
+		// Automatic fallback when OAuth client credentials are not provided:
+		// temporarily place this account's token in the native Keychain slot under a
+		// mutex, let `agy acp` perform Google's OAuth refresh, capture the fresh
+		// token, and restore the previous native Keychain slot.
+		return exclusive(nativeKeychainLock, async () => {
+			const keychain = input.keychain ?? createNativeAntigravityKeychain()
+			const previousRaw = await keychain.read().catch(() => null)
+			let updatedRaw: string | null = null
+			try {
+				await keychain.write(encodeAntigravityKeychainPayload(current))
+				await (input.refreshViaCli ?? defaultRefreshViaAgyCli)()
+				updatedRaw = await keychain.read().catch(() => null)
+			} finally {
+				if (previousRaw !== null) {
+					await keychain.write(previousRaw).catch(() => undefined)
+				} else {
+					await keychain.remove().catch(() => undefined)
+				}
+			}
+			if (updatedRaw === null) {
+				throw new ApplicationError(
+					'REAUTHENTICATION_REQUIRED',
+					'Antigravity credential could not be refreshed automatically; run: tokenmaxx login agy'
+				)
+			}
+			const live = decodeAntigravityKeychainPayload(updatedRaw)
+			const liveEmail = AccountEmailSchema.safeParse(live.id_token_email)
+			if (liveEmail.success && liveEmail.data !== input.identity) {
+				throw new ApplicationError(
+					'IDENTITY_CHANGED',
+					'Refreshed Antigravity credential belongs to a different account'
+				)
+			}
+			if (
+				live.token.access_token === current.token.access_token &&
+				(tokenExpiryMillis(live) ?? 0) <= (tokenExpiryMillis(current) ?? 0)
+			) {
+				throw new ApplicationError(
+					'REAUTHENTICATION_REQUIRED',
+					'Antigravity refresh did not renew the access token; run: tokenmaxx login agy'
+				)
+			}
+			const merged: AntigravityAuth = {
+				...live,
+				...(current.cloudaicompanion_project
+					? { cloudaicompanion_project: current.cloudaicompanion_project }
+					: {})
+			}
+			await input.vault.write(input.reference, JSON.stringify(merged))
+			return merged
+		})
 	})
 }
 
 async function resolveIdentityAndPlan(
 	credential: AntigravityAuth,
 	fetchImplementation: FetchImplementation
-): Promise<{ email: string; externalAccountId: string | null; plan: string | null }> {
+): Promise<{
+	email: string
+	externalAccountId: string | null
+	plan: string | null
+	project: string | null
+}> {
 	let emailCandidate = credential.id_token_email ?? null
 	let externalAccountId: string | null = null
 	try {
@@ -715,14 +877,17 @@ async function resolveIdentityAndPlan(
 		)
 	}
 	let plan: string | null = null
+	let project: string | null = credential.cloudaicompanion_project ?? null
 	try {
 		const status = await fetchCodeAssistStatus(credential.token.access_token, fetchImplementation)
 		plan = status.plan
+		project = status.project ?? project
 	} catch {}
 	return {
 		email: parsedEmail.data,
 		externalAccountId: externalAccountId ?? parsedEmail.data,
-		plan
+		plan,
+		project
 	}
 }
 
@@ -748,34 +913,40 @@ export async function registerAntigravityAccount(input: {
 		credential = decodeAntigravityKeychainPayload(raw)
 	} else {
 		const dependencies = input.dependencies ?? defaultLoginDependencies()
-		const previousRaw = await keychain.read()
-		await keychain.remove()
-		try {
-			const login = await dependencies.interactive(['agy', 'acp', '--login'], {})
-			if (login.exitCode !== 0) {
-				throw new ApplicationError('LOGIN_FAILED', loginFailureMessage('agy acp --login', login))
+		credential = await exclusive(nativeKeychainLock, async () => {
+			const previousRaw = await keychain.read()
+			await keychain.remove()
+			try {
+				const login = await dependencies.interactive(['agy', 'acp', '--login'], {
+					CLOUD_CODE_URL: undefined
+				})
+				if (login.exitCode !== 0) {
+					throw new ApplicationError('LOGIN_FAILED', loginFailureMessage('agy acp --login', login))
+				}
+				const raw = await keychain.read()
+				if (raw === null) {
+					throw new ApplicationError(
+						'CREDENTIAL_MISSING',
+						'agy acp --login finished without storing a credential in macOS Keychain'
+					)
+				}
+				return decodeAntigravityKeychainPayload(raw)
+			} finally {
+				if (previousRaw !== null) {
+					await keychain.write(previousRaw).catch(() => undefined)
+				}
 			}
-			const raw = await keychain.read()
-			if (raw === null) {
-				throw new ApplicationError(
-					'CREDENTIAL_MISSING',
-					'agy acp --login finished without storing a credential in macOS Keychain'
-				)
-			}
-			credential = decodeAntigravityKeychainPayload(raw)
-		} finally {
-			if (previousRaw !== null) {
-				await keychain.write(previousRaw).catch(() => undefined)
-			} else {
-				await keychain.remove().catch(() => undefined)
-			}
-		}
+		})
 	}
 
 	const identity = await resolveIdentityAndPlan(credential, fetchImplementation)
 	const id = crypto.randomUUID()
 	const secretReference = `antigravity:${id}`
-	await input.vault.write(secretReference, JSON.stringify(credential))
+	const storedCredential: AntigravityAuth = {
+		...credential,
+		...(identity.project !== null ? { cloudaicompanion_project: identity.project } : {})
+	}
+	await input.vault.write(secretReference, JSON.stringify(storedCredential))
 	const now = new Date().toISOString()
 	return {
 		auth: 'oauth',
@@ -796,14 +967,63 @@ export async function registerAntigravityAccount(input: {
 	}
 }
 
-function carriedForwardWindows(existing: UsageSnapshot | null, nowMillis: number): UsageWindow[] {
-	const windows = (existing?.windows ?? []).map(window => {
-		if (window.resetAt !== null && Date.parse(window.resetAt) <= nowMillis) {
-			return { ...window, resetAt: null, usedPercent: 0 }
-		}
-		return window
+export async function antigravityUpstream(input: {
+	account: Extract<Account, { provider: 'antigravity' }>
+	vault: CredentialVault
+	fetchImplementation?: FetchImplementation
+	now?: () => number
+	forceRefresh: boolean
+	keychain?: AntigravityKeychain
+	refreshViaCli?: () => Promise<void>
+	environment?: NodeJS.ProcessEnv
+}): Promise<UpstreamInjection> {
+	const reference = input.account.secretReference
+	const fetchImplementation = input.fetchImplementation ?? fetch
+	let credential = await syncActiveAntigravityFromKeychain({
+		account: input.account,
+		keychain: input.keychain,
+		vault: input.vault
 	})
-	return windows.length > 0 ? windows : [defaultAntigravityWindow()]
+	const nowMillis = (input.now ?? (() => Date.now()))()
+	if (input.forceRefresh || isTokenStale(credential, nowMillis)) {
+		credential = await refreshAntigravityCredential({
+			environment: input.environment,
+			fetchImplementation,
+			identity: input.account.identity,
+			keychain: input.keychain,
+			reference,
+			refreshViaCli: input.refreshViaCli,
+			staleAccessToken: credential.token.access_token,
+			vault: input.vault
+		})
+	}
+	let projectId = credential.cloudaicompanion_project ?? null
+	if (projectId === null) {
+		try {
+			const status = await fetchCodeAssistStatus(credential.token.access_token, fetchImplementation)
+			projectId = status.project
+			if (projectId !== null) {
+				await input.vault.write(
+					reference,
+					JSON.stringify({ ...credential, cloudaicompanion_project: projectId })
+				)
+			}
+		} catch {}
+	}
+	return {
+		accountId: input.account.id,
+		baseUrl: upstreamFor('antigravity'),
+		dialect: 'antigravity',
+		headers: { authorization: `Bearer ${credential.token.access_token}` },
+		...(projectId === null ? {} : { projectId })
+	}
+}
+
+function heldProxyLimit(existing: UsageSnapshot | null, nowMillis: number): UsageWindow | null {
+	const held = existing?.windows.find(window => window.id === antigravityLimitWindowId)
+	return held !== undefined && held.resetAt !== null && Date.parse(held.resetAt) > nowMillis
+		? held
+		: null
 }
 
 export async function probeAntigravity(input: {
@@ -833,12 +1053,11 @@ export async function probeAntigravity(input: {
 		)
 	}
 
-	const tryRefresh = (staleAccessToken: string) =>
+	const doRefresh = (staleAccessToken: string) =>
 		refreshAntigravityCredential({
 			environment: input.environment,
 			fetchImplementation,
 			identity: account.identity,
-			isActive,
 			keychain,
 			reference: account.secretReference,
 			refreshViaCli: input.refreshViaCli,
@@ -847,26 +1066,7 @@ export async function probeAntigravity(input: {
 		})
 
 	if (isTokenStale(credential, nowMillis)) {
-		const refreshed = await tryRefresh(credential.token.access_token)
-		if (refreshed !== null) {
-			credential = refreshed
-		} else {
-			const windows = carriedForwardWindows(input.existing, nowMillis)
-			return {
-				account: { ...account, health: 'ready', updatedAt: now.toISOString() },
-				usage: {
-					accountId: account.id,
-					extraUsage: null,
-					hardLimitReached: windows.some(window => window.kind === 'hard' && window.usedPercent >= 100),
-					measuredSpendUsd: null,
-					observedAt: now.toISOString(),
-					provider: 'antigravity',
-					resetCredits: null,
-					source: 'antigravityProbe',
-					windows
-				}
-			}
-		}
+		credential = await doRefresh(credential.token.access_token)
 	}
 
 	const runLiveProbe = async (activeCredential: AntigravityAuth) => {
@@ -874,11 +1074,25 @@ export async function probeAntigravity(input: {
 			activeCredential.token.access_token,
 			fetchImplementation
 		)
-		const windows = await fetchAvailableModels(
+		if (status.project !== null && status.project !== activeCredential.cloudaicompanion_project) {
+			await vault.write(
+				account.secretReference,
+				JSON.stringify({ ...activeCredential, cloudaicompanion_project: status.project })
+			)
+		}
+		const summaryWindows = await fetchQuotaSummary(
 			activeCredential.token.access_token,
 			status.project,
 			fetchImplementation
 		)
+		const windows =
+			summaryWindows.length > 0
+				? summaryWindows
+				: await fetchAvailableModels(
+						activeCredential.token.access_token,
+						status.project,
+						fetchImplementation
+					)
 		return { plan: status.plan, windows }
 	}
 
@@ -889,35 +1103,13 @@ export async function probeAntigravity(input: {
 		if (!(error instanceof ApplicationError) || error.code !== 'ACCESS_TOKEN_REJECTED') {
 			throw error
 		}
-		const refreshed = await tryRefresh(credential.token.access_token)
-		if (refreshed === null) {
-			if (isActive) {
-				throw new ApplicationError(
-					'REAUTHENTICATION_REQUIRED',
-					'Antigravity credential expired and could not be refreshed automatically'
-				)
-			}
-			const windows = carriedForwardWindows(input.existing, nowMillis)
-			return {
-				account: { ...account, health: 'ready', updatedAt: now.toISOString() },
-				usage: {
-					accountId: account.id,
-					extraUsage: null,
-					hardLimitReached: windows.some(window => window.kind === 'hard' && window.usedPercent >= 100),
-					measuredSpendUsd: null,
-					observedAt: now.toISOString(),
-					provider: 'antigravity',
-					resetCredits: null,
-					source: 'antigravityProbe',
-					windows
-				}
-			}
-		}
-		credential = refreshed
+		credential = await doRefresh(credential.token.access_token)
 		liveResult = await runLiveProbe(credential)
 	}
 
-	const windows = liveResult.windows.length > 0 ? liveResult.windows : [defaultAntigravityWindow()]
+	const held = heldProxyLimit(input.existing, nowMillis)
+	const windows =
+		liveResult.windows.length > 0 ? liveResult.windows : [held ?? defaultAntigravityWindow()]
 	return {
 		account: {
 			...account,
@@ -928,7 +1120,8 @@ export async function probeAntigravity(input: {
 		usage: {
 			accountId: account.id,
 			extraUsage: null,
-			hardLimitReached: windows.some(window => window.kind === 'hard' && window.usedPercent >= 100),
+			hardLimitReached:
+				held !== null || windows.some(window => window.kind === 'hard' && window.usedPercent >= 100),
 			measuredSpendUsd: null,
 			observedAt: now.toISOString(),
 			provider: 'antigravity',

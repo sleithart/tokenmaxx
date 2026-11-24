@@ -148,7 +148,7 @@ export const UsageSnapshotSchema = z.discriminatedUnion('provider', [
 		extraUsage: ExtraUsageSchema.nullish().default(null),
 		measuredSpendUsd: z.number().nonnegative().nullish().default(null),
 		provider: z.literal('antigravity'),
-		source: z.enum(['antigravityProbe'])
+		source: z.enum(['antigravityProbe', 'proxyResponseHeaders'])
 	}).strict()
 ])
 export type UsageSnapshot = z.infer<typeof UsageSnapshotSchema>

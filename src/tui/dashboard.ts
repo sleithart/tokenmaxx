@@ -983,7 +983,7 @@ function settingsPanel(
 		const hint =
 			row.key === 'routing'
 				? row.provider === 'antigravity'
-					? 'switch agy keychain login via tokenmaxx'
+					? 'route agy CLOUD_CODE_URL through tokenmaxx'
 					: `run ${providerCli(row.provider)} through tokenmaxx`
 				: row.key === 'auto'
 					? 'switch accounts as the active one fills'

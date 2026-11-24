@@ -121,6 +121,24 @@ function xaiObservation(headers: Headers, status: number): RateLimitObservation 
 	return { limited: true, windows: [xaiLimitWindow(100, resetAt)] }
 }
 
+export const antigravityLimitWindowId = 'antigravity:limit'
+
+export function antigravityLimitWindow(usedPercent: 0 | 100, resetAt: string | null): UsageWindow {
+	return { id: antigravityLimitWindowId, kind: 'hard', label: 'rate limit', resetAt, usedPercent }
+}
+
+function antigravityObservation(headers: Headers, status: number): RateLimitObservation | null {
+	if (status !== 429) {
+		return null
+	}
+	const seconds = Number(headers.get('retry-after'))
+	const resetAt =
+		Number.isFinite(seconds) && seconds > 0
+			? new Date(Date.now() + seconds * 1000).toISOString()
+			: null
+	return { limited: true, windows: [antigravityLimitWindow(100, resetAt)] }
+}
+
 export function observeRateLimitHeaders(
 	provider: ProviderId,
 	headers: Headers,
@@ -134,6 +152,6 @@ export function observeRateLimitHeaders(
 		case 'xai':
 			return xaiObservation(headers, status)
 		case 'antigravity':
-			return null
+			return antigravityObservation(headers, status)
 	}
 }

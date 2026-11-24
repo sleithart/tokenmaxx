@@ -1,13 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
 	type AntigravityAuth,
 	type AntigravityKeychain,
-	activateAntigravityAccount,
+	antigravityUpstream,
 	decodeAntigravityKeychainPayload,
 	encodeAntigravityKeychainPayload,
+	extractAntigravityQuotaSummaryWindows,
 	extractAntigravityWindows,
 	normalizeAntigravityPlan,
 	probeAntigravity,
@@ -15,11 +17,13 @@ import {
 	registerAntigravityAccount,
 	syncActiveAntigravityFromKeychain
 } from './antigravity.ts'
-import { installAntigravityConfig, uninstallAntigravityConfig } from './config-install.ts'
-import type { Account, UsageSnapshot } from './domain.ts'
-import { AccountManager } from './manager.ts'
-import { applicationPaths, ensureApplicationPaths } from './paths.ts'
-import { createStateStore } from './storage.ts'
+import {
+	installAntigravityConfig,
+	installStatus,
+	uninstallAntigravityConfig
+} from './config-install.ts'
+import type { Account } from './domain.ts'
+import { applicationPaths } from './paths.ts'
 import type { CredentialVault } from './vault.ts'
 
 function memoryVault(initial: Record<string, string>): CredentialVault & {
@@ -64,6 +68,7 @@ function memoryKeychain(initial: string | null = null): AntigravityKeychain & {
 const reference = 'antigravity:test'
 const stored: AntigravityAuth = {
 	auth_method: 'consumer',
+	cloudaicompanion_project: 'proj-1',
 	id_token_email: 'user@example.com',
 	token: {
 		access_token: 'access-1',
@@ -93,16 +98,18 @@ const account: Extract<Account, { provider: 'antigravity' }> = {
 }
 
 describe('antigravity keychain codec', () => {
-	test('round-trips credentials with go-keyring-base64 encoding', () => {
+	test('round-trips credentials with go-keyring-base64 encoding and strips internal project field', () => {
 		const encoded = encodeAntigravityKeychainPayload(stored)
 		expect(encoded.startsWith('go-keyring-base64:')).toBe(true)
-		expect(decodeAntigravityKeychainPayload(encoded)).toEqual(stored)
+		const decoded = decodeAntigravityKeychainPayload(encoded)
+		expect(decoded.token).toEqual(stored.token)
+		expect(decoded.cloudaicompanion_project).toBeUndefined()
 	})
 
 	test('decodes hex-wrapped go-keyring payloads from macOS security', () => {
 		const encoded = encodeAntigravityKeychainPayload(stored)
 		const hex = Buffer.from(encoded, 'utf8').toString('hex')
-		expect(decodeAntigravityKeychainPayload(hex)).toEqual(stored)
+		expect(decodeAntigravityKeychainPayload(hex).token).toEqual(stored.token)
 	})
 
 	test('normalizes Antigravity tier identifiers', () => {
@@ -113,20 +120,85 @@ describe('antigravity keychain codec', () => {
 	})
 })
 
-describe('extractAntigravityWindows', () => {
-	test('groups Gemini and third-party model quotas and ignores internal tab models', () => {
+describe('quota extraction', () => {
+	test('extracts ordered 5h and weekly windows from retrieveUserQuotaSummary', () => {
+		const windows = extractAntigravityQuotaSummaryWindows({
+			groups: [
+				{
+					buckets: [
+						{
+							bucketId: 'gemini-weekly',
+							remainingFraction: 0.6865,
+							resetTime: '2026-11-30T20:04:46Z',
+							window: 'weekly'
+						},
+						{
+							bucketId: 'gemini-5h',
+							remainingFraction: 0.8851,
+							resetTime: '2026-11-24T20:15:53Z',
+							window: '5h'
+						}
+					],
+					displayName: 'Gemini Models'
+				},
+				{
+					buckets: [
+						{
+							bucketId: '3p-weekly',
+							remainingFraction: 1,
+							resetTime: '2026-12-01T18:13:09Z',
+							window: 'weekly'
+						},
+						{
+							bucketId: '3p-5h',
+							remainingFraction: 0.75,
+							resetTime: '2026-11-24T23:15:07Z',
+							window: '5h'
+						}
+					],
+					displayName: 'Claude and GPT models'
+				}
+			]
+		})
+		expect(windows).toEqual([
+			{
+				id: 'antigravity:gemini-5h',
+				kind: 'hard',
+				label: 'Gemini 5h',
+				resetAt: '2026-11-24T20:15:53.000Z',
+				usedPercent: 11.5
+			},
+			{
+				id: 'antigravity:gemini-weekly',
+				kind: 'hard',
+				label: 'Gemini 7d',
+				resetAt: '2026-11-30T20:04:46.000Z',
+				usedPercent: 31.4
+			},
+			{
+				id: 'antigravity:3p-5h',
+				kind: 'hard',
+				label: 'Claude 5h',
+				resetAt: '2026-11-24T23:15:07.000Z',
+				usedPercent: 25
+			},
+			{
+				id: 'antigravity:3p-weekly',
+				kind: 'hard',
+				label: 'Claude 7d',
+				resetAt: '2026-12-01T18:13:09.000Z',
+				usedPercent: 0
+			}
+		])
+	})
+
+	test('falls back to fetchAvailableModels buckets and ignores internal tab models', () => {
 		const windows = extractAntigravityWindows({
 			models: {
 				'claude-opus-5-5-high': {
 					quotaInfo: { remainingFraction: 0.65, resetTime: '2026-11-24T22:00:00Z' }
 				},
-				'claude-sonnet-5-5-medium': {
-					quotaInfo: { remainingFraction: 0.7, resetTime: '2026-11-24T22:00:00Z' }
-				},
 				'gemini-2.5-pro': {
-					quotaInfo: { remainingFraction: 0.91, resetTime: '2026-11-24T20:15:00Z' }
-				},
-				'gemini-3-flash': {
 					quotaInfo: { remainingFraction: 0.91, resetTime: '2026-11-24T20:15:00Z' }
 				},
 				'gpt-oss-120b-medium': {
@@ -141,14 +213,14 @@ describe('extractAntigravityWindows', () => {
 			{
 				id: 'antigravity:gemini',
 				kind: 'hard',
-				label: 'Gemini',
+				label: 'Gemini 5h',
 				resetAt: '2026-11-24T20:15:00.000Z',
 				usedPercent: 9
 			},
 			{
 				id: 'antigravity:claude',
 				kind: 'hard',
-				label: 'Claude',
+				label: 'Claude 5h',
 				resetAt: '2026-11-24T22:00:00.000Z',
 				usedPercent: 35
 			}
@@ -172,7 +244,7 @@ describe('registerAntigravityAccount', () => {
 		return new Response('', { status: 404 })
 	}
 
-	test('imports the currently signed-in keychain login without launching agy', async () => {
+	test('imports the currently signed-in keychain login and persists its project id', async () => {
 		const vault = memoryVault({})
 		const keychain = memoryKeychain(encodeAntigravityKeychainPayload(stored))
 		const registered = await registerAntigravityAccount({
@@ -185,13 +257,15 @@ describe('registerAntigravityAccount', () => {
 		expect(registered.identity).toBe('second@example.com')
 		expect(registered.externalAccountId).toBe('google-user-2')
 		expect(registered.plan).toBe('pro')
-		expect(vault.items.has(registered.secretReference ?? '')).toBe(true)
+		expect(
+			JSON.parse(vault.items.get(registered.secretReference ?? '') ?? '{}').cloudaicompanion_project
+		).toBe('proj-2')
 	})
 
-	test('runs isolated agy acp --login and restores the previous keychain entry afterwards', async () => {
+	test('runs isolated agy acp --login with CLOUD_CODE_URL unset and restores previous keychain', async () => {
 		const previousRaw = encodeAntigravityKeychainPayload(stored)
 		const newCredential: AntigravityAuth = {
-			...stored,
+			auth_method: 'consumer',
 			id_token_email: 'second@example.com',
 			token: { ...stored.token, access_token: 'access-2', refresh_token: 'refresh-2' }
 		}
@@ -200,8 +274,9 @@ describe('registerAntigravityAccount', () => {
 
 		const registered = await registerAntigravityAccount({
 			dependencies: {
-				interactive: async command => {
+				interactive: async (command, env) => {
 					expect(command).toEqual(['agy', 'acp', '--login'])
+					expect(env.CLOUD_CODE_URL).toBeUndefined()
 					expect(keychain.value).toBeNull()
 					await keychain.write(encodeAntigravityKeychainPayload(newCredential))
 					return { exitCode: 0, stderr: '' }
@@ -213,18 +288,115 @@ describe('registerAntigravityAccount', () => {
 		})
 		expect(registered.identity).toBe('second@example.com')
 		expect(keychain.value).toBe(previousRaw)
-		expect(JSON.parse(vault.items.get(registered.secretReference ?? '') ?? '{}')).toEqual(
-			newCredential
-		)
+		expect(
+			JSON.parse(vault.items.get(registered.secretReference ?? '') ?? '{}').token.access_token
+		).toBe('access-2')
 	})
 })
 
-describe('keychain activation and sync', () => {
-	test('activateAntigravityAccount writes go-keyring-base64 payload to native keychain', async () => {
+describe('antigravityUpstream and refresh', () => {
+	test('injects bearer token, antigravity dialect, and cached project id', async () => {
+		const injection = await antigravityUpstream({
+			account,
+			forceRefresh: false,
+			keychain: memoryKeychain(null),
+			now: () => Date.parse('2026-11-24T19:00:00.000Z'),
+			vault: memoryVault({ [reference]: JSON.stringify(stored) })
+		})
+		expect(injection.baseUrl).toBe('https://daily-cloudcode-pa.googleapis.com')
+		expect(injection.dialect).toBe('antigravity')
+		expect(injection.projectId).toBe('proj-1')
+		expect(injection.headers.authorization).toBe('Bearer access-1')
+	})
+
+	test('refreshes via OAuth endpoint when client credentials are configured', async () => {
 		const vault = memoryVault({ [reference]: JSON.stringify(stored) })
-		const keychain = memoryKeychain(null)
-		await activateAntigravityAccount({ account, keychain, vault })
-		expect(keychain.value).toBe(encodeAntigravityKeychainPayload(stored))
+		const refreshed = await refreshAntigravityCredential({
+			environment: {
+				TOKENMAXX_ANTIGRAVITY_OAUTH_CLIENT_ID: 'cid',
+				TOKENMAXX_ANTIGRAVITY_OAUTH_CLIENT_SECRET: 'csec'
+			},
+			fetchImplementation: async (input, init) => {
+				expect(String(input)).toBe('https://oauth2.googleapis.com/token')
+				const params = new URLSearchParams(String(init?.body))
+				expect(params.get('client_id')).toBe('cid')
+				expect(params.get('client_secret')).toBe('csec')
+				expect(params.get('refresh_token')).toBe('refresh-1')
+				return Response.json({ access_token: 'access-new', expires_in: 3600 })
+			},
+			identity: account.identity,
+			keychain: memoryKeychain(null),
+			reference,
+			vault
+		})
+		expect(refreshed.token.access_token).toBe('access-new')
+		expect(refreshed.cloudaicompanion_project).toBe('proj-1')
+	})
+
+	test('refreshes an expired token via agy CLI keychain swap and restores previous keychain', async () => {
+		const otherRaw = encodeAntigravityKeychainPayload({
+			auth_method: 'consumer',
+			id_token_email: 'other@example.com',
+			token: { ...stored.token, access_token: 'other-access' }
+		})
+		const expired: AntigravityAuth = {
+			...stored,
+			token: { ...stored.token, access_token: 'old-access', expiry: '2026-11-24T18:00:00.000Z' }
+		}
+		const refreshed: AntigravityAuth = {
+			auth_method: 'consumer',
+			id_token_email: 'user@example.com',
+			token: { ...stored.token, access_token: 'fresh-access', expiry: '2026-11-24T21:00:00.000Z' }
+		}
+		const keychain = memoryKeychain(otherRaw)
+		const vault = memoryVault({ [reference]: JSON.stringify(expired) })
+
+		const result = await probeAntigravity({
+			account,
+			environment: {},
+			existing: null,
+			fetchImplementation: async (input, init) => {
+				const auth = (init?.headers as Record<string, string>)?.Authorization
+				expect(auth).toBe('Bearer fresh-access')
+				if (String(input).includes('loadCodeAssist')) {
+					return Response.json({
+						cloudaicompanionProject: 'proj-1',
+						paidTier: { id: 'g1-ultra-tier' }
+					})
+				}
+				if (String(input).includes('retrieveUserQuotaSummary')) {
+					return Response.json({
+						groups: [
+							{
+								buckets: [
+									{
+										bucketId: 'gemini-5h',
+										remainingFraction: 0.9,
+										resetTime: '2026-11-24T22:00:00Z',
+										window: '5h'
+									}
+								],
+								displayName: 'Gemini Models'
+							}
+						]
+					})
+				}
+				return Response.json({})
+			},
+			isActive: false,
+			keychain,
+			now: () => new Date('2026-11-24T19:00:00.000Z'),
+			refreshViaCli: async () => {
+				expect(decodeAntigravityKeychainPayload(keychain.value ?? '').token.access_token).toBe(
+					'old-access'
+				)
+				await keychain.write(encodeAntigravityKeychainPayload(refreshed))
+			},
+			vault
+		})
+		expect(result.usage.windows[0]?.usedPercent).toBe(10)
+		expect(keychain.value).toBe(otherRaw)
+		expect(JSON.parse(vault.items.get(reference) ?? '{}').token.access_token).toBe('fresh-access')
 	})
 
 	test('syncActiveAntigravityFromKeychain pulls a fresher token back into the vault', async () => {
@@ -240,272 +412,31 @@ describe('keychain activation and sync', () => {
 		const keychain = memoryKeychain(encodeAntigravityKeychainPayload(fresher))
 		const synced = await syncActiveAntigravityFromKeychain({ account, keychain, vault })
 		expect(synced.token.access_token).toBe('access-fresher')
-		expect(JSON.parse(vault.items.get(reference) ?? '{}').token.access_token).toBe('access-fresher')
+		expect(synced.cloudaicompanion_project).toBe('proj-1')
 	})
 })
 
-describe('refreshAntigravityCredential and probeAntigravity', () => {
-	const now = () => new Date('2026-11-24T19:00:00.000Z')
-
-	test('refreshes via OAuth endpoint when client credentials are configured', async () => {
-		const vault = memoryVault({ [reference]: JSON.stringify(stored) })
-		const keychain = memoryKeychain(null)
-		const refreshed = await refreshAntigravityCredential({
-			environment: {
-				TOKENMAXX_ANTIGRAVITY_OAUTH_CLIENT_ID: 'cid',
-				TOKENMAXX_ANTIGRAVITY_OAUTH_CLIENT_SECRET: 'csec'
-			},
-			fetchImplementation: async (input, init) => {
-				expect(String(input)).toBe('https://oauth2.googleapis.com/token')
-				const params = new URLSearchParams(String(init?.body))
-				expect(params.get('client_id')).toBe('cid')
-				expect(params.get('client_secret')).toBe('csec')
-				expect(params.get('refresh_token')).toBe('refresh-1')
-				return Response.json({ access_token: 'access-new', expires_in: 3600 })
-			},
-			identity: account.identity,
-			isActive: true,
-			keychain,
-			reference,
-			vault
-		})
-		expect(refreshed?.token.access_token).toBe('access-new')
-		expect(decodeAntigravityKeychainPayload(keychain.value ?? '').token.access_token).toBe(
-			'access-new'
-		)
-	})
-
-	test('probes live quota and plan from Cloud Code endpoints', async () => {
-		const vault = memoryVault({ [reference]: JSON.stringify(stored) })
-		const result = await probeAntigravity({
-			account,
-			existing: null,
-			fetchImplementation: async input => {
-				const url = String(input)
-				if (url.includes('loadCodeAssist')) {
-					return Response.json({
-						cloudaicompanionProject: 'proj-1',
-						paidTier: { id: 'g1-ultra-tier' }
-					})
-				}
-				return Response.json({
-					models: {
-						'claude-opus-5-5-high': {
-							quotaInfo: { remainingFraction: 0.4, resetTime: '2026-11-24T22:00:00Z' }
-						},
-						'gemini-2.5-pro': {
-							quotaInfo: { remainingFraction: 0.85, resetTime: '2026-11-24T20:00:00Z' }
-						}
-					}
-				})
-			},
-			isActive: false,
-			keychain: memoryKeychain(null),
-			now,
-			vault
-		})
-		expect(result.account.health).toBe('ready')
-		expect(result.account.plan).toBe('ultra')
-		expect(result.usage.source).toBe('antigravityProbe')
-		expect(result.usage.hardLimitReached).toBe(false)
-		expect(result.usage.windows).toEqual([
-			{
-				id: 'antigravity:gemini',
-				kind: 'hard',
-				label: 'Gemini',
-				resetAt: '2026-11-24T20:00:00.000Z',
-				usedPercent: 15
-			},
-			{
-				id: 'antigravity:claude',
-				kind: 'hard',
-				label: 'Claude',
-				resetAt: '2026-11-24T22:00:00.000Z',
-				usedPercent: 60
-			}
-		])
-	})
-
-	test('keeps an expired inactive account ready and resets passed windows when no OAuth secret is set', async () => {
-		const expired: AntigravityAuth = {
-			...stored,
-			token: { ...stored.token, expiry: '2026-11-24T18:00:00.000Z' }
-		}
-		const existing: UsageSnapshot = {
-			accountId: account.id,
-			extraUsage: null,
-			hardLimitReached: true,
-			measuredSpendUsd: null,
-			observedAt: '2026-11-24T17:30:00.000Z',
-			provider: 'antigravity',
-			resetCredits: null,
-			source: 'antigravityProbe',
-			windows: [
-				{
-					id: 'antigravity:gemini',
-					kind: 'hard',
-					label: 'Gemini',
-					resetAt: '2026-11-24T18:30:00.000Z',
-					usedPercent: 100
-				},
-				{
-					id: 'antigravity:claude',
-					kind: 'hard',
-					label: 'Claude',
-					resetAt: '2026-11-24T21:00:00.000Z',
-					usedPercent: 40
-				}
-			]
-		}
-		const result = await probeAntigravity({
-			account,
-			environment: {},
-			existing,
-			fetchImplementation: async () => {
-				throw new Error('should not call network when inactive token is expired without client secret')
-			},
-			isActive: false,
-			keychain: memoryKeychain(null),
-			now,
-			vault: memoryVault({ [reference]: JSON.stringify(expired) })
-		})
-		expect(result.account.health).toBe('ready')
-		expect(result.usage.hardLimitReached).toBe(false)
-		expect(result.usage.windows).toEqual([
-			{
-				id: 'antigravity:gemini',
-				kind: 'hard',
-				label: 'Gemini',
-				resetAt: null,
-				usedPercent: 0
-			},
-			{
-				id: 'antigravity:claude',
-				kind: 'hard',
-				label: 'Claude',
-				resetAt: '2026-11-24T21:00:00.000Z',
-				usedPercent: 40
-			}
-		])
-	})
-
-	test('refreshes an expired active account via agy CLI and probes live quota', async () => {
-		const expired: AntigravityAuth = {
-			...stored,
-			token: { ...stored.token, access_token: 'old-access', expiry: '2026-11-24T18:00:00.000Z' }
-		}
-		const refreshed: AntigravityAuth = {
-			...stored,
-			token: { ...stored.token, access_token: 'fresh-access', expiry: '2026-11-24T20:00:00.000Z' }
-		}
-		const keychain = memoryKeychain(encodeAntigravityKeychainPayload(expired))
-		const vault = memoryVault({ [reference]: JSON.stringify(expired) })
-		let cliRefreshes = 0
-		const result = await probeAntigravity({
-			account,
-			environment: {},
-			existing: null,
-			fetchImplementation: async (input, init) => {
-				const auth = (init?.headers as Record<string, string>)?.Authorization
-				expect(auth).toBe('Bearer fresh-access')
-				if (String(input).includes('loadCodeAssist')) {
-					return Response.json({ paidTier: { id: 'g1-ultra-tier' } })
-				}
-				return Response.json({
-					models: {
-						'gemini-2.5-pro': {
-							quotaInfo: { remainingFraction: 0.9, resetTime: '2026-11-24T20:00:00Z' }
-						}
-					}
-				})
-			},
-			isActive: true,
-			keychain,
-			now,
-			refreshViaCli: async () => {
-				cliRefreshes += 1
-				await keychain.write(encodeAntigravityKeychainPayload(refreshed))
-			},
-			vault
-		})
-		expect(cliRefreshes).toBe(1)
-		expect(result.usage.windows[0]?.usedPercent).toBe(10)
-		expect(JSON.parse(vault.items.get(reference) ?? '{}').token.access_token).toBe('fresh-access')
-	})
-})
-
-describe('AccountManager antigravity switching', () => {
-	test('writes target credential to native keychain on switch when routed, and skips when unrouted', async () => {
-		const home = mkdtempSync(join(tmpdir(), 'tokenmaxx-agy-mgr-'))
+describe('antigravity shell config install', () => {
+	test('writes and removes fish CLOUD_CODE_URL config cleanly', async () => {
+		const home = mkdtempSync(join(tmpdir(), 'tokenmaxx-agy-env-'))
+		const prev = process.env.TOKENMAXX_AGY_ENV_FILE
+		const envFile = join(home, 'fish', 'conf.d', 'tokenmaxx.fish')
+		process.env.TOKENMAXX_AGY_ENV_FILE = envFile
 		try {
-			const paths = applicationPaths({ TOKENMAXX_HOME: home })
-			await ensureApplicationPaths(paths)
-			const store = createStateStore(paths.database)
-			const secondCredential: AntigravityAuth = {
-				...stored,
-				id_token_email: 'second@example.com',
-				token: { ...stored.token, access_token: 'access-2', refresh_token: 'refresh-2' }
-			}
-			const secondAccount: Extract<Account, { provider: 'antigravity' }> = {
-				...account,
-				externalAccountId: 'google-user-2',
-				id: '00000000-0000-4000-8000-000000000100',
-				identity: 'second@example.com',
-				label: 'second@example.com',
-				secretReference: 'antigravity:second'
-			}
-			const vault = memoryVault({
-				[reference]: JSON.stringify(stored),
-				'antigravity:second': JSON.stringify(secondCredential)
-			})
-			const keychain = memoryKeychain(null)
-			const manager = new AccountManager({
-				dependencies: {
-					antigravityKeychain: keychain,
-					fetchImplementation: async input => {
-						if (String(input).includes('loadCodeAssist')) {
-							return Response.json({ paidTier: { id: 'g1-pro-tier' } })
-						}
-						return Response.json({
-							models: {
-								'gemini-2.5-pro': {
-									quotaInfo: { remainingFraction: 0.8, resetTime: '2026-11-24T21:00:00Z' }
-								}
-							}
-						})
-					},
-					now: () => new Date('2026-11-24T19:00:00.000Z')
-				},
-				paths,
-				store,
-				vault
-			})
+			const paths = applicationPaths({ TOKENMAXX_HOME: join(home, 'state') })
+			expect((await installStatus(paths)).routed.antigravity).toBe(false)
 
-			await manager.saveAccount({
-				account,
-				removePrevious: { profilePath: null, secretReference: null }
-			})
-			// Not routed yet -> native keychain untouched
-			expect(keychain.value).toBeNull()
+			await installAntigravityConfig(paths, envFile)
+			const written = await readFile(envFile, 'utf8')
+			expect(written).toContain('set -gx CLOUD_CODE_URL "http://127.0.0.1:8459/antigravity"')
+			expect((await installStatus(paths)).routed.antigravity).toBe(true)
 
-			await installAntigravityConfig(paths)
-			await manager.syncActiveProvider('antigravity')
-			expect(keychain.value).toBe(encodeAntigravityKeychainPayload(stored))
-
-			await manager.saveAccount({
-				account: secondAccount,
-				removePrevious: { profilePath: null, secretReference: null }
-			})
-			await manager.switchAccount('antigravity', secondAccount.id, 'manual')
-			expect(keychain.value).toBe(encodeAntigravityKeychainPayload(secondCredential))
-
-			await uninstallAntigravityConfig(paths)
-			await manager.switchAccount('antigravity', account.id, 'manual')
-			// Unrouted again -> native keychain stays as it was
-			expect(keychain.value).toBe(encodeAntigravityKeychainPayload(secondCredential))
-
-			store.close()
+			await uninstallAntigravityConfig(paths, envFile)
+			expect(await Bun.file(envFile).exists()).toBe(false)
+			expect((await installStatus(paths)).routed.antigravity).toBe(false)
 		} finally {
+			if (prev === undefined) delete process.env.TOKENMAXX_AGY_ENV_FILE
+			else process.env.TOKENMAXX_AGY_ENV_FILE = prev
 			rmSync(home, { force: true, recursive: true })
 		}
 	})

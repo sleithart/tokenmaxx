@@ -692,9 +692,7 @@ async function signInOauth(
 	process.stdout.write(
 		existing === undefined
 			? `Signed in ${account.label}.\n`
-			: provider === 'antigravity'
-				? `Re-authenticated ${account.label}; start a new agy session (or run agy --continue) to use it.\n`
-				: `Re-authenticated ${account.label}; live sessions pick it up on their next request.\n`
+			: `Re-authenticated ${account.label}; live sessions pick it up on their next request.\n`
 	)
 	return existing === undefined
 }
@@ -739,7 +737,7 @@ async function login(
 		await requestRouting(socket, provider, true).catch(() => undefined)
 		process.stdout.write(
 			provider === 'antigravity'
-				? 'tokenmaxx Keychain switching is on for agy — switch accounts any time, then restart or run agy --continue.\n'
+				? 'tokenmaxx is on for agy — open a new shell (or run: source ~/.config/fish/conf.d/tokenmaxx.fish) so agy uses CLOUD_CODE_URL.\n'
 				: `tokenmaxx is on for ${providerArgument} — run ${providerArgument} as usual.\n`
 		)
 	}
@@ -904,11 +902,7 @@ async function switchAccount(
 	const target = resolveAccount(context.store, provider, accountReference)
 	await ensureDaemon(context)
 	await requestSwitch(context.paths.managerSocket, provider, target.id)
-	process.stdout.write(
-		provider === 'antigravity'
-			? `Switched agy Keychain login to ${target.label}. Start a new agy session (or run agy --continue) to use it.\n`
-			: `Switched managed ${providerArgument} sessions to ${target.label}.\n`
-	)
+	process.stdout.write(`Switched managed ${providerArgument} sessions to ${target.label}.\n`)
 }
 
 async function configureAutomation(
@@ -1077,7 +1071,7 @@ async function doctor(context: ApplicationContext): Promise<void> {
 	const routing = await installStatus(context.paths)
 	const routedText: Record<ProviderId, string> = {
 		anthropic: 'settings.json routes ANTHROPIC_BASE_URL through tokenmaxx',
-		antigravity: 'macOS Keychain switches agy accounts via tokenmaxx',
+		antigravity: 'shell config routes CLOUD_CODE_URL through tokenmaxx',
 		openai: 'config.toml selects the tokenmaxx provider',
 		xai: 'config.toml points cli_chat_proxy_base_url at tokenmaxx'
 	}

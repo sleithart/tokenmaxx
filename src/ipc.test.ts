@@ -40,6 +40,7 @@ beforeEach(async () => {
 	process.env.CODEX_HOME = join(home, 'codex')
 	process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
 	process.env.PI_CODING_AGENT_DIR = join(home, 'pi')
+	process.env.TOKENMAXX_AGY_ENV_FILE = join(home, 'fish', 'conf.d', 'tokenmaxx.fish')
 	await mkdir(process.env.CODEX_HOME, { recursive: true })
 	await mkdir(process.env.CLAUDE_CONFIG_DIR, { recursive: true })
 	const paths = applicationPaths({ ...process.env, TOKENMAXX_HOME: join(home, 'state') })
@@ -60,6 +61,7 @@ afterEach(async () => {
 	delete process.env.CODEX_HOME
 	delete process.env.CLAUDE_CONFIG_DIR
 	delete process.env.PI_CODING_AGENT_DIR
+	delete process.env.TOKENMAXX_AGY_ENV_FILE
 	secrets.clear()
 	rmSync(home, { force: true, recursive: true })
 })

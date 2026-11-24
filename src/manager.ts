@@ -1,8 +1,4 @@
-import {
-	type AntigravityKeychain,
-	activateAntigravityAccount,
-	probeAntigravity
-} from './antigravity.ts'
+import { type AntigravityKeychain, antigravityUpstream, probeAntigravity } from './antigravity.ts'
 import {
 	claudeResetCredits,
 	claudeUpstream,
@@ -19,7 +15,6 @@ import {
 	redeemCodexResetCredit,
 	registerOpenAiApiKeyAccount
 } from './codex.ts'
-import { installStatus } from './config-install.ts'
 import {
 	type Account,
 	AutomationPolicySchema,
@@ -211,7 +206,11 @@ export class AccountManager {
 				case 'xai':
 					return await grokUpstream({ account, ...shared })
 				case 'antigravity':
-					return null
+					return await antigravityUpstream({
+						account,
+						keychain: this.#dependencies.antigravityKeychain,
+						...shared
+					})
 			}
 		} catch (error) {
 			const cause = error instanceof Error ? error : undefined
@@ -336,7 +335,7 @@ export class AccountManager {
 			}
 			const state = this.#store.findProviderState(input.account.provider)
 			if (state.activeAccountId === null) {
-				await this.commitActivation({
+				this.commitActivation({
 					provider: input.account.provider,
 					reason: 'first-account',
 					sourceAccountId: null,
@@ -344,27 +343,6 @@ export class AccountManager {
 					target: input.account
 				})
 			}
-		})
-	}
-
-	public async syncActiveProvider(provider: ProviderId): Promise<void> {
-		if (provider !== 'antigravity') {
-			return
-		}
-		await this.withProviderOperation('antigravity', async () => {
-			const active = this.activeAccount('antigravity')
-			if (active === null || active.provider !== 'antigravity') {
-				return
-			}
-			const status = await installStatus(this.#paths)
-			if (!status.routed.antigravity) {
-				return
-			}
-			await activateAntigravityAccount({
-				account: active,
-				keychain: this.#dependencies.antigravityKeychain,
-				vault: this.#vault
-			})
 		})
 	}
 
@@ -598,7 +576,7 @@ export class AccountManager {
 			if (state.activeAccountId !== targetAccountId) {
 				await this.probeAndSave(target)
 			}
-			await this.commitActivation({
+			this.commitActivation({
 				provider,
 				reason,
 				sourceAccountId: state.activeAccountId,
@@ -755,7 +733,7 @@ export class AccountManager {
 		if (target === null || target.provider !== provider || !target.enabled) {
 			return
 		}
-		await this.commitActivation({
+		this.commitActivation({
 			provider,
 			reason: `automatic:${reason}`,
 			sourceAccountId: state.activeAccountId,
@@ -764,23 +742,13 @@ export class AccountManager {
 		})
 	}
 
-	private async commitActivation(input: {
+	private commitActivation(input: {
 		provider: ProviderId
 		state: ProviderState
 		sourceAccountId: string | null
 		target: Account
 		reason: string
-	}): Promise<void> {
-		if (input.target.provider === 'antigravity') {
-			const status = await installStatus(this.#paths)
-			if (status.routed.antigravity) {
-				await activateAntigravityAccount({
-					account: input.target,
-					keychain: this.#dependencies.antigravityKeychain,
-					vault: this.#vault
-				})
-			}
-		}
+	}): void {
 		const now = this.#dependencies.now().toISOString()
 		this.#store.commitSwitch(
 			SwitchRecordSchema.parse({

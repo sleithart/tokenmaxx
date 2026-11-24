@@ -153,9 +153,6 @@ async function dispatch(
 		case 'routing/set': {
 			const parsed = RoutingParamsSchema.parse(params)
 			await setRouting(manager.paths, parsed.target, parsed.enable)
-			if (parsed.target === 'antigravity' && parsed.enable) {
-				await manager.syncActiveProvider('antigravity')
-			}
 			return routingStatus(Bun.which, manager.paths)
 		}
 		case 'version/latest':

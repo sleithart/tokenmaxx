@@ -20,11 +20,19 @@ const disabledPrefix = /^#\s*(?:tokenmaxx|tokmax)-disabled:\s*/
 
 export function clientConfigPaths(environment: NodeJS.ProcessEnv = process.env) {
 	return {
+		antigravity: resolve(
+			environment.TOKENMAXX_AGY_ENV_FILE ??
+				join(homedir(), '.config', 'fish', 'conf.d', 'tokenmaxx.fish')
+		),
 		claude: resolve(environment.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'settings.json'),
 		codex: resolve(environment.CODEX_HOME ?? join(homedir(), '.codex'), 'config.toml'),
 		grok: resolve(environment.GROK_HOME ?? join(homedir(), '.grok'), 'config.toml'),
 		pi: resolve(environment.PI_CODING_AGENT_DIR ?? join(homedir(), '.pi', 'agent'), 'models.json')
 	}
+}
+
+function antigravityEnvPath(): string {
+	return clientConfigPaths().antigravity
 }
 
 function codexConfigPath(): string {
@@ -298,29 +306,58 @@ export async function uninstallGrokConfig(path = grokConfigPath()): Promise<stri
 	return path
 }
 
-function antigravityRoutingMarkerPath(paths: ApplicationPaths): string {
-	return join(paths.root, 'antigravity-routing.json')
+const agyCloudCodeLine =
+	/^\s*(?:set\s+-gx\s+CLOUD_CODE_URL\s+|export\s+CLOUD_CODE_URL=)["']?([^"'\s#]+)["']?/
+
+function stripAntigravityManagedBlock(content: string): string {
+	return stripMarkedBlock(content, topBeginMarker, topEndMarker)
+		.replace(/\n{3,}/g, '\n\n')
+		.trim()
 }
 
-export async function installAntigravityConfig(paths: ApplicationPaths): Promise<string> {
-	const path = antigravityRoutingMarkerPath(paths)
-	await mkdir(dirname(path), { mode: 0o700, recursive: true })
-	await writeFile(path, `${JSON.stringify({ mode: 'keychain' }, null, 2)}\n`, { mode: 0o600 })
+function buildAntigravityManagedBlock(paths: ApplicationPaths, path: string): string {
+	const targetUrl = proxyBaseUrl(paths, 'antigravity')
+	const assignment = path.endsWith('.fish')
+		? `set -gx CLOUD_CODE_URL "${targetUrl}"`
+		: `export CLOUD_CODE_URL="${targetUrl}"`
+	return [topBeginMarker, assignment, topEndMarker].join('\n')
+}
+
+export async function installAntigravityConfig(
+	paths: ApplicationPaths,
+	path = antigravityEnvPath()
+): Promise<string> {
+	const existing = await readFileOrEmpty(path)
+	const base = stripAntigravityManagedBlock(existing)
+	const block = buildAntigravityManagedBlock(paths, path)
+	const installed = base.length === 0 ? `${block}\n` : `${base}\n\n${block}\n`
+	const sanitized = existing.includes(topBeginMarker)
+		? base.length === 0
+			? ''
+			: `${base}\n`
+		: undefined
+	await saveConfigBackup(paths, path, installed, sanitized)
+	await mkdir(dirname(path), { recursive: true })
+	await writeFile(path, installed, { mode: 0o600 })
 	return path
 }
 
 export async function uninstallAntigravityConfig(
-	paths = applicationPaths()
+	paths = applicationPaths(),
+	path = antigravityEnvPath()
 ): Promise<string | null> {
-	const path = antigravityRoutingMarkerPath(paths)
-	const existed = await stat(path).then(
-		() => true,
-		() => false
-	)
-	if (!existed) {
+	if (await restoreConfigBackup(paths, path)) return path
+	const existing = await readFile(path, 'utf8').catch(() => null)
+	if (existing === null || !existing.includes(topBeginMarker)) {
 		return null
 	}
-	await rm(path, { force: true })
+	const restored = stripAntigravityManagedBlock(existing)
+	if (restored.length === 0) {
+		await rm(path, { force: true })
+	} else {
+		await writeFile(path, `${restored}\n`, { mode: 0o600 })
+	}
+	await forgetConfigBackup(paths, path)
 	return path
 }
 
@@ -362,7 +399,7 @@ interface InstallStatus {
 	routed: Record<ProviderId, boolean>
 }
 
-export async function installStatus(paths = applicationPaths()): Promise<InstallStatus> {
+export async function installStatus(_paths = applicationPaths()): Promise<InstallStatus> {
 	const codexRaw = await readFileOrEmpty(codexConfigPath())
 	let codexRouted = false
 	let codexBaseUrl: string | null = null
@@ -411,14 +448,21 @@ export async function installStatus(paths = applicationPaths()): Promise<Install
 		grokBaseUrl = null
 	}
 	const grokRouted = grokBaseUrl?.includes('127.0.0.1') ?? false
-	const antigravityRouted = await stat(antigravityRoutingMarkerPath(paths)).then(
-		() => true,
-		() => false
-	)
+
+	let antigravityBaseUrl: string | null = null
+	const agyRaw = await readFileOrEmpty(antigravityEnvPath())
+	for (const line of agyRaw.split('\n')) {
+		const match = line.match(agyCloudCodeLine)
+		if (match?.[1] !== undefined) {
+			antigravityBaseUrl = match[1]
+		}
+	}
+	const antigravityRouted = antigravityBaseUrl?.includes('127.0.0.1') ?? false
+
 	return {
 		baseUrls: {
 			anthropic: claudeBaseUrl,
-			antigravity: null,
+			antigravity: antigravityBaseUrl,
 			openai: codexBaseUrl,
 			xai: grokBaseUrl
 		},
@@ -442,20 +486,16 @@ export async function healInstalledConfigs(paths: ApplicationPaths): Promise<Pro
 		return []
 	}
 	const { baseUrls, routed } = await installStatus(paths)
-	const ownBaseUrls: Record<ProviderId, string | null> = {
+	const ownBaseUrls: Record<ProviderId, string> = {
 		anthropic: proxyBaseUrl(paths, 'anthropic'),
-		antigravity: null,
+		antigravity: proxyBaseUrl(paths, 'antigravity'),
 		openai: proxyBaseUrl(paths, 'openai'),
 		xai: `${proxyBaseUrl(paths, 'xai')}/v1`
 	}
 	const healed: ProviderId[] = []
 	for (const provider of ProviderIdSchema.options) {
 		const baseUrl = baseUrls[provider]
-		if (
-			routed[provider] &&
-			ownBaseUrls[provider] !== null &&
-			(baseUrl === null || baseUrl === ownBaseUrls[provider])
-		) {
+		if (routed[provider] && (baseUrl === null || baseUrl === ownBaseUrls[provider])) {
 			await installProviderConfig(provider, paths)
 			healed.push(provider)
 		}
