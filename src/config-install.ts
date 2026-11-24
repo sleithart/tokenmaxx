@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { forgetConfigBackup, restoreConfigBackup, saveConfigBackup } from './config-backup.ts'
 import { type ProviderId, ProviderIdSchema } from './domain.ts'
 import type { ApplicationPaths } from './paths.ts'
@@ -18,12 +18,23 @@ const legacyEndMarkers = [topEndMarker, '# <<< tokmax managed <<<']
 const legacyDummyTokens = [dummyAuthToken, 'managed-by-tokmax']
 const disabledPrefix = /^#\s*(?:tokenmaxx|tokmax)-disabled:\s*/
 
+function defaultAntigravityEnvPath(environment: NodeJS.ProcessEnv): string {
+	if (environment.TOKENMAXX_AGY_ENV_FILE !== undefined) {
+		return resolve(environment.TOKENMAXX_AGY_ENV_FILE)
+	}
+	const shell = basename(environment.SHELL ?? '').toLowerCase()
+	if (shell === 'fish') {
+		return join(homedir(), '.config', 'fish', 'conf.d', 'tokenmaxx.fish')
+	}
+	if (shell === 'bash') {
+		return join(homedir(), '.bash_profile')
+	}
+	return join(environment.ZDOTDIR ? resolve(environment.ZDOTDIR) : homedir(), '.zshrc')
+}
+
 export function clientConfigPaths(environment: NodeJS.ProcessEnv = process.env) {
 	return {
-		antigravity: resolve(
-			environment.TOKENMAXX_AGY_ENV_FILE ??
-				join(homedir(), '.config', 'fish', 'conf.d', 'tokenmaxx.fish')
-		),
+		antigravity: defaultAntigravityEnvPath(environment),
 		claude: resolve(environment.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'settings.json'),
 		codex: resolve(environment.CODEX_HOME ?? join(homedir(), '.codex'), 'config.toml'),
 		grok: resolve(environment.GROK_HOME ?? join(homedir(), '.grok'), 'config.toml'),

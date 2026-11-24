@@ -9,6 +9,7 @@ import { registerAntigravityAccount } from './antigravity.ts'
 import { registerClaudeAccount } from './claude.ts'
 import { registerCodexAccount } from './codex.ts'
 import {
+	clientConfigPaths,
 	healInstalledConfigs,
 	installPiConfig,
 	installProviderConfig,
@@ -735,9 +736,10 @@ async function login(
 	const routing = await readRouting(socket)
 	if (!routing.routed[provider]) {
 		await requestRouting(socket, provider, true).catch(() => undefined)
+		const agyEnvFile = clientConfigPaths().antigravity
 		process.stdout.write(
 			provider === 'antigravity'
-				? 'tokenmaxx is on for agy — open a new shell (or run: source ~/.config/fish/conf.d/tokenmaxx.fish) so agy uses CLOUD_CODE_URL.\n'
+				? `tokenmaxx is on for agy — open a new shell (or run: source ${agyEnvFile}) so agy uses CLOUD_CODE_URL.\n`
 				: `tokenmaxx is on for ${providerArgument} — run ${providerArgument} as usual.\n`
 		)
 	}

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -18,6 +18,7 @@ import {
 	syncActiveAntigravityFromKeychain
 } from './antigravity.ts'
 import {
+	clientConfigPaths,
 	installAntigravityConfig,
 	installStatus,
 	uninstallAntigravityConfig
@@ -417,6 +418,24 @@ describe('antigravityUpstream and refresh', () => {
 })
 
 describe('antigravity shell config install', () => {
+	test('detects fish, zsh, and bash config paths from SHELL', () => {
+		expect(clientConfigPaths({ SHELL: '/opt/homebrew/bin/fish' }).antigravity).toEndWith(
+			join('.config', 'fish', 'conf.d', 'tokenmaxx.fish')
+		)
+		expect(clientConfigPaths({ SHELL: '/bin/zsh' }).antigravity).toEndWith('.zshrc')
+		expect(clientConfigPaths({ SHELL: '/bin/zsh', ZDOTDIR: '/tmp/custom-zsh' }).antigravity).toBe(
+			'/tmp/custom-zsh/.zshrc'
+		)
+		expect(clientConfigPaths({ SHELL: '/bin/bash' }).antigravity).toEndWith('.bash_profile')
+		expect(clientConfigPaths({}).antigravity).toEndWith('.zshrc')
+		expect(
+			clientConfigPaths({
+				SHELL: '/opt/homebrew/bin/fish',
+				TOKENMAXX_AGY_ENV_FILE: '/tmp/override.zsh'
+			}).antigravity
+		).toBe('/tmp/override.zsh')
+	})
+
 	test('writes and removes fish CLOUD_CODE_URL config cleanly', async () => {
 		const home = mkdtempSync(join(tmpdir(), 'tokenmaxx-agy-env-'))
 		const prev = process.env.TOKENMAXX_AGY_ENV_FILE
@@ -433,6 +452,30 @@ describe('antigravity shell config install', () => {
 
 			await uninstallAntigravityConfig(paths, envFile)
 			expect(await Bun.file(envFile).exists()).toBe(false)
+			expect((await installStatus(paths)).routed.antigravity).toBe(false)
+		} finally {
+			if (prev === undefined) delete process.env.TOKENMAXX_AGY_ENV_FILE
+			else process.env.TOKENMAXX_AGY_ENV_FILE = prev
+			rmSync(home, { force: true, recursive: true })
+		}
+	})
+
+	test('writes export CLOUD_CODE_URL to zshrc and preserves user lines on uninstall', async () => {
+		const home = mkdtempSync(join(tmpdir(), 'tokenmaxx-agy-zsh-'))
+		const prev = process.env.TOKENMAXX_AGY_ENV_FILE
+		const zshrc = join(home, '.zshrc')
+		process.env.TOKENMAXX_AGY_ENV_FILE = zshrc
+		try {
+			await writeFile(zshrc, 'export EDITOR=vim\n')
+			const paths = applicationPaths({ TOKENMAXX_HOME: join(home, 'state') })
+			await installAntigravityConfig(paths, zshrc)
+			const written = await readFile(zshrc, 'utf8')
+			expect(written).toContain('export EDITOR=vim')
+			expect(written).toContain('export CLOUD_CODE_URL="http://127.0.0.1:8459/antigravity"')
+			expect((await installStatus(paths)).routed.antigravity).toBe(true)
+
+			await uninstallAntigravityConfig(paths, zshrc)
+			expect(await readFile(zshrc, 'utf8')).toBe('export EDITOR=vim\n')
 			expect((await installStatus(paths)).routed.antigravity).toBe(false)
 		} finally {
 			if (prev === undefined) delete process.env.TOKENMAXX_AGY_ENV_FILE
